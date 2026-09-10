@@ -32,11 +32,12 @@
 AgentTeams 默认是**任务卡片**式的：任务列表、审批计划、状态快照。
 但多角色协作真正好用的形态是**群聊**——谁在干活、谁说了什么、任务怎么被拆开的，应该像刷群一样一眼看到，而且能**对着某句话继续追问**。
 
-这个插件做三件事：
+这个插件做四件事：
 
 1. **把团队变成群聊**：成员的真实发言、工作状态、任务流转，全部实时流入一个对话流
 2. **把新会话交给团队**：团队功能开启时，新会话的任务优先由常驻「铁三角」接手
 3. **像飞书一样对话**：角色框区分发言者，可引用回复，回复折叠成话题、按需展开
+4. **一行一步地把控**：默认「步骤视图」展示每个成员的步骤 + 产物 + 决策，可切入对应子代理会话细看、评论或插入任务
 
 ## 安装
 
@@ -125,7 +126,48 @@ dsh plugin --profile <你的 profile 名> add dsh-team-chat
 
 话题根默认折叠，显示 `2 条回复 ▸`；点击展开后回复以缩进轨道渲染（每条仍是完整角色框，可继续回复）。折叠状态下有新增回复时计数加粗。
 
-### 5. 团队模板：多团队 + 每成员配置
+### 5. 步骤视图（一行一步）与「详细」开关
+
+群聊默认显示**步骤视图**：每个成员一行一步——`[角色] step N · 动作 · 产物 · 结果`，按 turn/step 编号、按成员分组、可折叠；行内含「进入 / 评论 / 插任务」操作。步骤数据来自宿主 `/steps` 投影（纯内存折叠，来源与聊天同一条 `session/event` 订阅，零新增读路径）：
+
+| 步骤字段 | 来源 |
+|---|---|
+| 动作（action） | `tool/call.name` |
+| 产物（artifact） | `tool/call.arguments`（自动识别文件路径/命令；缺失显示 `—`，不编造） |
+| 结果（result） | `tool/result`（失败 → `error: NAME (CODE)`，按契约取 `error.name`/`error.code`，并兼容 `message` 形态；`meta.truncated` → `truncated`；否则 `ok`） |
+| 决策（decision） | 该 step 的 `assistant/message` 文本，折叠进该 step 所有工具行 |
+
+「步骤 ⇄ 详细」切换按钮：**详细** = 完整发言流（threads），从宿主事件订阅的 surface 缓冲渲染（`surfaceOp` append/replace 语义，见 `docs/optimization/detail-view-data-source.md`）。切换共用滚动容器，**不丢阅读位置**。该设置不持久，每次打开默认步骤视图。
+
+> **诊断可观测**：快照里的三个计数器——`artifactParseFailures`（产物解析失败）、`timeouts`（有界读超时）、`errorDetailMisses`（错误明细丢失）——非零时在面板诊断行内联显示 `· ⚠ N 项`，悬停展开全明细。它们把"静默丢弃"变成**可见状态**；没有出口的计数器等于没有计数器。
+
+### 6. 点击步骤切入子代理会话 + 评论 / 插任务
+
+步骤行的「进入」按钮把主视图切换到该成员的子代理会话——调用 DSH 平台公开客户端服务（`ctx.get('sessions')`，运行时根服务，非本插件能力）：
+
+```js
+const sessions = ctx.get('sessions')                     // 运行时根服务，非包
+const address = sessions.subagentAddress(childSessionId) // → { parentSessionId, childSessionId, mode }
+sessions.openSubagent(address)                           // 官方切换原语（service.js:159）
+```
+
+**四条降级路径 + 一条兜底（均不崩、均不静默）**——`jumpToSubagent` 的返回值带 `reason` 码，便于诊断：
+
+| 情形 | `reason` | 表现 |
+|---|---|---|
+| `sessions` 服务未挂载（`ctx.get('sessions')` 为 undefined） | `no-service` | 不跳转；显示「无法切入该会话（sessions 服务未挂载），已展示步骤详情」 |
+| `subagentAddress` 拿不到地址（该成员非健康目录子级） | `no-address` | 不跳转；提示 + **保留 sessionId 供复制**手动切换 |
+| `openSubagent` 抛错（非健康 child，`manager.js:109`） | `open-failed` | catch 降级；显示步骤详情，不崩溃 |
+| 服务已挂载但该 DSH 版本无 `openSubagent`（旧版） | `no-openSubagent` | 不跳转；显示步骤详情 |
+| 其他未预期异常 | `unexpected` | 外层 catch 兜底；显示步骤详情 |
+
+每条降级都埋了 `console.warn` 采样（`lib/client.js:283/295/313/323`，各带自身 `try/catch` 防止日志级联），所以「点了没反应」不会静默发生——**跳转在某些部署上会优雅退化，而不是报错或崩溃**。`subagentAddress` 自身抛错也归入 `no-address`（同点采样）。
+
+「评论」锁定该成员为发送目标并进入引用输入态（复用 `/speak`，宿主经 `subagents.sendMessage` 送达）；「插任务」调 `/task` 定向该成员。切会话切换中（switching 遮罩）时发送被阻断并提示，防止在旧数据视图上提交无效引用。
+
+> 实现前提验证见 `docs/optimization/client-sessions-access.md`（t23）与 `docs/optimization/better-sidebar-pattern.md`（t12 §10：better-sidebar 同款用法，公开契约可行）。
+
+### 7. 团队模板：多团队 + 每成员配置
 
 **设置 → 团队群聊** 就是一个团队模板库：
 
@@ -166,7 +208,7 @@ AgentTeams 派生成员时，persona 模板由它自己生成，**唯一的外�
 
 「指引级」意味着：成员会按配置行事，但它**技术上仍能**调用未列出的 skill 或 MCP。若你需要真正的硬隔离（例如「审查员只能读不能写」），见下方「后续计划」。
 
-### 6. IM 会话的团队进度同步
+### 8. IM 会话的团队进度同步
 
 当会话来自 IM（飞书 / 企业微信等，用户消息里带 `<dsh_im_source>`），团队进度要能被 IM 用户看到。本插件提供**两条互补通道**：
 
@@ -188,7 +230,7 @@ POST /api/dsh-im/delivery/messages
 
 投递失败会以提示形式显示在群聊面板里（例如 `IM 投递失败：delivery-failed`），不会静默失败。
 
-### 7. 持久化与作用域
+### 9. 持久化与作用域
 
 | 配置 | 存放位置 | 作用域 |
 |---|---|---|
@@ -215,7 +257,7 @@ POST /api/dsh-im/delivery/messages
 | 同时显示右侧常驻栏 | 关 | 开启后除标签页外，额外保留右侧常驻栏 |
 | 显示成员收到的指令 | 开 | 以「📨 收到」小字显示成员收到的上游指令 |
 | 紧凑模式 | 关 | 缩小角色框间距与字号 |
-| 刷新间隔 | 3 秒 | 拉取成员发言的频率（1–30 秒） |
+| 刷新间隔 | 3 秒 | 客户端轮询 `/state` 快照的频率（1–30 秒）；成员发言**不靠它拉取**——宿主侧用 `session/event` 事件订阅实时推送（见「工作原理 → 数据通路」），此间隔只决定面板多久向宿主对一次快照 |
 | 启动时自动打开标签页 | 开 | 启动后自动在侧栏打开该标签 |
 
 ## 工作原理
@@ -227,8 +269,8 @@ AgentTeams 的 `agentTeams` 服务**注册在队长 Agent 自己的作用域内*
 
 | 需求 | 数据源 |
 |---|---|
-| 成员名册 + 实时活动 | `ctx.subagents.listChildren(captainSessionId)` |
-| 成员的真实发言 | `ctx.sessionQuery.readSurface(memberSessionId)` |
+| 成员名册 + 实时活动 | `ctx.subagents.listChildren(captainSessionId)`（roster 低频兜底） |
+| 成员的真实发言 | **`session/event` 事件订阅**（主通路，含 `user/message` / `assistant/message` / `tool/result` 与步骤事件）；`ctx.sessionQuery.readSurface(memberSessionId)` 仅剩**首拉 / 滞后重同步**（`syncCatchUp`，带 2.5s 超时） |
 | 发言 / 派任务（唤醒成员） | `ctx.subagents.sendMessage(captainAgent, …)` |
 
 队长会话通过「哪个 Agent 拥有带 `agent-teams:` 标签的子节点」自动发现，不依赖任何硬编码 id。
@@ -242,13 +284,16 @@ AgentTeams 的 `agentTeams` 服务**注册在队长 Agent 自己的作用域内*
 ```
   浏览器 (lib/client.js)                    Host (lib/index.js)
   ┌──────────────────────┐                 ┌──────────────────────────────┐
-  │ better-sidebar 标签页 │──GET /state────▶│ 轮询成员会话 (3s)             │
+  │ better-sidebar 标签页 │──GET /state────▶│ 事件驱动（session/event 订阅）│
   │ 角色框 / 引用 / 话题   │◀──threads──────│ 增量提取 (seq 游标) → 话题组装 │
+  │ 步骤视图 / 详细切换    │──GET /steps───▶│ 步骤投影（纯内存折叠）        │
   │                      │──POST /speak───▶│ 绑定话题 + subagents.sendMessage│
   │ 设置页 (settings.     │──POST /task────▶│ 广播任务给全员                 │
   │  section)            │──GET/POST──────▶│ 读写 team-chat 设置命名空间    │
   │                      │   /settings    │                               │
   └──────────────────────┘                 └──────────────────────────────┘
+成员发言：session/event 事件订阅（实时推送；回调只做 O(1) 过滤 + seq 去重 + 入队，500ms 节流消费）
+roster 兜底：listChildren 每 45 秒一次（只列成员，不读 surface）；readSurface 仅首拉/滞后重同步
 ```
 
 **线程组装在 Host 完成**（`groupThreads`），客户端只渲染——分组逻辑因此可被单元测试覆盖，且不会在两半边出现两份实现。
@@ -257,7 +302,11 @@ Host 半边暴露六个路由（`/plugins/dsh-team-chat/{state,speak,task,settin
 
 ### 增量读取
 
-每个成员维护 `seq` 游标：首次见到成员时设为会话尾部（面板打开即干净，不回放历史），之后只提取新增事件，且从尾部反向扫描、最多 24 条即停，避免长会话（数万事件）被反复全量扫描。
+成员发言不再靠轮询拉取，而是**宿主侧订阅 `session/event`**（`{ global: true }`），热回调内只做 O(1) 工作：成员集合过滤 → 丢弃 `assistant/chunk` 流式噪声（约 60% 流量）→ 按关注类型过滤 → `seq` 游标去重 → 入环形缓冲。**单个成员缓冲上限 2000 条**，溢出置 `lag` 并触发快照重同步（`syncCatchUp`），不会无界增长。
+
+消费侧每 **500ms** 节流批量 drain 一次缓冲，复用原有增量语义（`assistant/message` 走 `pendingThread` 一次性话题绑定、`user/message` 产生 incoming 行、`tool/result` 等保留进 surface/步骤投影）。`readSurface` 不再周期调用，仅剩**首拉**（/state 初次同步）与**滞后重同步**（心跳检出 `STALL_MS=60s` 无事件时）两条路径，且都带 2.5s 有界超时。
+
+守护：**心跳 30s** 检查一次——若成员 `running` 但 `STALL_MS` 内无事件，记日志并触发 `syncCatchUp` 自检（防静默停更）；全部订阅回调 `try/catch` + `ctx.logger.warn`。
 
 ## 开发
 
@@ -281,7 +330,10 @@ window.__ModuleLoader__.load({
 
 ## 已知限制
 
+- **首拉最坏约 5 秒（病态最坏值，正常路径毫秒级）**：/state 首次同步要跑两条串行的有界 `readSurfaceTimed`——`syncCatchUp` 的 `refreshSurface` 与 `imOriginOf`（IM 来源解析），各带 2.5s 超时（`lib/index.js` `READ_SURFACE_TIMEOUT_MS=2500`），t25 故障注入实测合计约 5021ms。**这是注入超时的最坏值**：正常路径两者毫秒级返回。本轮回合**未修**——核验之后改代码会让 P1 链核验失效，故排入下一轮。后续优化方向：让 `imOriginOf` 与首拉并行、或缓存 IM 来源。
 - **每成员配置是指引级，不是工具级隔离**：Skills / MCP / 插件 / Memory / Soul 都经 `executionPrompt` 进入成员 persona，模型会遵守，但技术上仍可调用未列出的工具。硬隔离需要 AgentTeams 支持在成员创建时挂载不同 agent preset，或使用下述的委托 provider 方案。
+- **停滞检测只能弱信号**：插件读不到任务的 `claimed` 状态（AgentTeams 的 `agentTeams` 服务在队长作用域内，兄弟插件 `ctx.get('agentTeams')` 为 `undefined`，见 `docs/optimization/stall-detection-feasibility.md`）。面板只能给出「疑似停滞」提示（成员 `idle` 且超过 `STALL_MS` 无消息级事件），**有误报**：深度长时间推理未产出消息的成员、刚 claim 正处首回合的成员会被误标。恢复仍须经队长执行 `agent_teams_reassign_task`（插件无权直达）。
+- **宿主用例在裸检出需 junction 才能真跑**：`test/host-smoke.test.mjs`（16 用例）与 `test/host-events.test.mjs`（7 用例）在裸检出下**全部明确 skip**（peer 依赖 `schemastery` 需从安装 profile 解析）。要真实执行需建临时树并链接 profile 的 `schemastery`，步骤见 `docs/optimization/host-evidence-repro.md`。**别把默认 skip 当作"在跑"**——宿主侧结论请以该文档的复现步骤为准。
 - **冷恢复边界**：向当前处于 `inactive`（非活跃）的成员投递消息时，子代理的冷恢复可能失败，界面如实显示错误而不静默丢弃。成员被唤醒过一次后即可正常收发。
 - **话题绑定是启发式**：见「引用回复」一节；不宣称精确关联。
 - **面板「派任务」是广播**：成员各自判断是否接手，不写入 AgentTeams 正式任务板与质量门禁。需要正式任务契约时仍由队长在对话里创建。

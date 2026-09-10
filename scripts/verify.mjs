@@ -135,10 +135,62 @@ check('client registers the better-sidebar tab', clientSource.includes('register
 check('client falls back to shell.overlay', clientSource.includes('shell.overlay'))
 check('client never uses JSX', !/<[A-Z][A-Za-z]*[\s/>]/.test(clientSource.replace(/<[a-z/!]/g, '')))
 
+// ---------------------------------------------------------------- theming
+process.stdout.write('\n[theming]\n')
+check('client never uses made-up --dsh- tokens', !/--dsh-/.test(clientSource))
+check('client never pairs a self-drawn background with color:inherit', !/background: (?!'transparent'|'none')[^}]*color: 'inherit'/.test(clientSource.replace(/\s+/g, ' ')))
+check('client styles every drawn surface with a --dsw-* label token', clientSource.includes('--dsw-alias-label-primary') || clientSource.includes('--dsw-alias-label-secondary') || clientSource.includes('--dsw-alias-label-tertiary'))
+
 const hostSource = await readFile(join(ROOT, 'lib/index.js'), 'utf8')
 check('host exports name/inject/apply', /export const name/.test(hostSource) && /export const inject/.test(hostSource) && /export function apply/.test(hostSource))
 check('host serves /state, /speak, /task', ['/state', '/speak', '/task'].every((suffix) => hostSource.includes(`ROUTE_PREFIX + '${suffix}'`)))
+check('host serves the step projection route', hostSource.includes(`ROUTE_PREFIX + '/steps'`))
 check('host fences every route', hostSource.includes('requestRejection'))
+
+// ---------------------------------------------------------------- host perf guard (P1a)
+process.stdout.write('\n[host perf guard]\n')
+const codeLines = hostSource.split('\n').filter((line) => !line.trim().startsWith('*') && !line.trim().startsWith('//'))
+const directReadSurface = codeLines.filter((line) => line.includes('ctx.sessionQuery.readSurface(')).length
+check('readSurface is called through exactly one bounded wrapper (P1a)', directReadSurface === 1 && hostSource.includes('readSurfaceTimed'), `code call sites: ${directReadSurface}`)
+check('the wrapper bounds readSurface with a hard timeout', hostSource.includes('READ_SURFACE_TIMEOUT_MS') && hostSource.includes('Promise.race'))
+check('listChildren is bounded by the same timeout', hostSource.includes('listChildrenTimed'))
+check('refresh is single-flight (one in-flight pass max)', hostSource.includes('refreshInFlight') && hostSource.includes('function refreshAll'))
+check('request paths never start a refresh (they sync only on first pull)', /sync && !state\.firstPullDone/.test(hostSource) && /state\.firstPullDone = true/.test(hostSource))
+check('snapshot surfaces freshness for the client', hostSource.includes('stale:') && hostSource.includes('generatedAt:'))
+check('request path kicks a stale-gated background refresh', hostSource.includes('>= ROSTER_POLL_MS') && hostSource.includes('void refreshAll()'))
+check('timeouts are counted, never silently dropped', hostSource.includes('timeoutCount') && hostSource.includes('lastError = '))
+
+// ---------------------------------------------------------------- host event feed guard (P1b)
+process.stdout.write('\n[host event feed guard]\n')
+check('feed subscribes to session/event globally', /ctx\.on\('session\/event'/.test(hostSource) && /global:\s*true/.test(hostSource))
+check('feed subscribes to agent/status', /ctx\.on\('agent\/status'/.test(hostSource))
+check('hot callback drops assistant/chunk first (the 53-67% noise)', /event\.type === 'assistant\/chunk'\)\s*\{/.test(hostSource) || /event\.type === 'assistant\/chunk'/.test(hostSource))
+check('hot callback only enqueues (cursor + ring buffer, no work)', hostSource.includes('cell.rows.push(event)') && hostSource.includes('cell.seq = seq'))
+check('unbounded growth is impossible (cap + lag resync)', hostSource.includes('FEED_CAP') && hostSource.includes('cell.lag = true'))
+check('throttled consumer drains off the hot path', hostSource.includes('drainFeeds') && hostSource.includes('FLUSH_MS'))
+check('feed has an observable heartbeat', hostSource.includes('HEARTBEAT_MS') && hostSource.includes('lastEventAt'))
+check('heartbeat self-checks instead of silently stalling', hostSource.includes('STALL_MS') && hostSource.includes('syncCatchUp()'))
+check('subscriptions and timers are disposed on unload', /ctx\.effect\(\(\) => \(\) => \{[\s\S]*?feedDisposers[\s\S]*?clearInterval\(rosterPoller\)/.test(hostSource))
+check('roster fallback keeps a 30-60s cadence', /ROSTER_POLL_MS\s*=\s*(3[0-9]|4[0-9]|5[0-9]|60)000/.test(hostSource))
+check('the periodic pass does not read member surfaces', /async function refreshRoster\(\)/.test(hostSource) && !/function refreshRoster[\s\S]{0,1200}readSurfaceTimed/.test(hostSource))
+check('surface catch-up is retained for first pull / lag only', /async function syncCatchUp\(\)/.test(hostSource) && /syncCatchUp\(\)/.test(hostSource))
+check('surface-eligible events are retained for the detail view (t24)', hostSource.includes('SURFACE_EVENT_TYPES') && hostSource.includes('surfaceEvents'))
+check('agent/status handler is guarded like the event handler', (hostSource.match(/ctx\.logger\.warn\('team-chat:/g) || []).length >= 3)
+
+// ---------------------------------------------------------------- host steps guard (P2a)
+process.stdout.write('\n[host steps guard]\n')
+check('steps are served over a dedicated route', hostSource.includes(`ROUTE_PREFIX + '/steps'`))
+check('step events are retained from the SAME feed (no second data source)', hostSource.includes('STEP_EVENT_TYPES') && hostSource.includes('stepEvents') && hostSource.includes('seedStepEvents'))
+check('step projection is a pure in-memory fold (no read calls)', /function projectSteps\(state, memberId, memberName\)/.test(hostSource) && /rows\.slice\(-WINDOW_MESSAGES\)/.test(hostSource))
+check('the steps route never reads a member surface', (() => {
+  const routeStart = hostSource.indexOf(`ROUTE_PREFIX + '/steps'`)
+  if (routeStart < 0) return false
+  const snippet = hostSource.slice(routeStart, routeStart + 2000)
+  const inner = (snippet.match(/handler: async \(req, res\) => \{[\s\S]*?\n\s*\},/) || [''])[0]
+  return inner.length === 0 || (!inner.includes('readSurface') && !inner.includes('filterEvents') && !inner.includes('readEvent'))
+})())
+check('tool artifacts are extracted from arguments, missing → —', hostSource.includes('function artifactOf') && hostSource.includes("'—'"))
+check('steps are capped to the same window as messages (bounded)', hostSource.includes('projectSteps') && /WINDOW_MESSAGES/.test(hostSource))
 
 // ---------------------------------------------------------------- shared helpers
 process.stdout.write('\n[shared helpers]\n')
@@ -214,6 +266,8 @@ check('host accepts the imPush setting', /clean\.imPush = patch\.imPush/.test(ho
 check('unit tests exist', await exists('test/shared.test.mjs'))
 check('host smoke test exists', await exists('test/host-smoke.test.mjs'))
 check('client render test exists', await exists('test/client.test.mjs'))
+check('host event-feed behaviour test exists (t17)', await exists('test/host-events.test.mjs'))
+check('host evidence reproduction guide exists (t17)', await exists('docs/optimization/host-evidence-repro.md'))
 
 // ---------------------------------------------------------------- report
 process.stdout.write('\n')

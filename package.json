@@ -1,6 +1,6 @@
 {
   "name": "dsh-team-chat",
-  "version": "0.3.5",
+  "version": "0.4.0",
   "description": "Multi-role team templates for DeepSeek Harness: a live group-chat sidebar with role frames and threads, per-member configuration (skills, MCP, memory, persona), multiple teams, and default-team routing for new sessions.",
   "type": "module",
   "license": "MIT",
