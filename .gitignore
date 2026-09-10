@@ -1,0 +1,16 @@
+# Node
+node_modules/
+npm-debug.log*
+pnpm-debug.log*
+
+# Package artifacts
+*.tgz
+
+# Editors / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Local dev junctions (used to resolve peer deps while testing)
+/node_modules
