@@ -1,0 +1,6 @@
+url: https://github.com/CocoWithIce/dsh-team-chat
+name: CocoWithIce/dsh-team-chat
+category: workflow
+description:
+  en: 'Multi-role agent teams with a group-chat sidebar: role-framed messages and threaded replies, multiple team templates with per-member skills/MCP/memory configuration, automatic routing of new sessions into the team, and optional IM progress relay.'
+  zh: '多角色智能体团队群聊侧边栏：按角色分栏并支持话题与引用回复，可配多套团队模板与逐成员的 skill/MCP/memory，新会话自动路由到团队，并可把团队进度同步到 IM。'
