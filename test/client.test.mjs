@@ -100,6 +100,22 @@ async function loadClientExports() {
 }
 
 /**
+ * Temporarily replace global `navigator` (Node 24 defines it as an accessor, so
+ * a plain assignment would throw in strict mode). Restores the original
+ * descriptor afterwards, so tests never leak a stub into sibling cases.
+ */
+async function withNavigator(stub, fn) {
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'navigator')
+  Object.defineProperty(globalThis, 'navigator', { value: stub, configurable: true, writable: true })
+  try {
+    return await fn()
+  } finally {
+    if (descriptor) Object.defineProperty(globalThis, 'navigator', descriptor)
+    else delete globalThis.navigator
+  }
+}
+
+/**
  * Expand an element tree by rendering function and class components, collecting
  * every text node. This is what turns "the panel came up blank" into a testable
  * fact: if a component returns nothing, the collected text is empty.
@@ -601,18 +617,53 @@ test('t35: diagnosticsOf gives the full breakdown for the hover title', async ()
 
 test('t35: the ChatBody diagnostics line renders the counters exit (end-to-end)', async () => {
   const internals = (await loadClientExports()).__internals
-  // The diagnostic strip consumes countersOf(data); render ChatBody with a data
-  // payload carrying a non-zero counter and confirm the ⚠ chip shows.
-  // ChatBody's initial state is EMPTY_STATE (all counters 0), so this asserts
-  // the pure helper path used by the strip, plus the strip text includes it.
+  // The strip feeds `countersOf(data)` into the diagnostics line. ChatBody's
+  // initial state is EMPTY_STATE (all counters zero) so the chip is absent
+  // there; assert BOTH halves of the contract instead of a hollow `void src`:
+  //  (a) the strip's helper produces the chip for a non-zero payload, and
+  //  (b) the rendered diagnostics line carries the mode/session segment the
+  //      strip appends it to.
+  const chip = internals.countersOf({ artifactParseFailures: 2, errorDetailMisses: 1, timeouts: 0 })
+  assert.match(chip, /⚠ 2 项/, 'non-zero counters must produce the visible chip')
+
   const text = renderTree(internals.ChatBody({
     config: { pollSeconds: 3 },
     sessionId: 'session-abc',
     active: true,
   })).join('\n')
   assert.ok(text.length > 0, 'ChatBody renders without throwing')
-  // The strip itself references the counters helper (source-level truth that
-  // the exit is wired into the view, not only in __internals).
-  const src = (await import('node:fs/promises')).readFile
-  void src
+  assert.match(text, /tab · session-/, 'the diagnostics line is rendered by ChatBody')
+})
+
+// ---------------------------------------------------------------- t39/B: copyText honesty
+
+test('t39/B: copyText resolves false when the clipboard write REJECTS', async () => {
+  const internals = (await loadClientExports()).__internals
+  // The pre-t39 implementation returned `true` unconditionally once the API
+  // existed, ignoring the write's rejection — the user saw a success flash with
+  // an empty clipboard. The fixed contract must surface the real outcome.
+  await withNavigator({
+    clipboard: { writeText: () => Promise.reject(new Error('clipboard denied')) },
+  }, async () => {
+    assert.equal(await internals.copyText('session-xyz'), false,
+      'a rejected write must resolve false, never a claimed success')
+  })
+})
+
+test('t39/B: copyText resolves true when the clipboard write succeeds', async () => {
+  const internals = (await loadClientExports()).__internals
+  await withNavigator({
+    clipboard: { writeText: () => Promise.resolve() },
+  }, async () => {
+    assert.equal(await internals.copyText('session-xyz'), true,
+      'a confirmed write resolves true')
+  })
+})
+
+test('t39/B: copyText resolves false when no clipboard API exists', async () => {
+  const internals = (await loadClientExports()).__internals
+  await withNavigator(undefined, async () => {
+    assert.equal(await internals.copyText('session-xyz'), false,
+      'missing API must report a failure, not a phantom success')
+  })
 })

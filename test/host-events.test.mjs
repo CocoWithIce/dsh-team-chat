@@ -279,7 +279,8 @@ test('P1: member run projects one row per tool/call with artifacts, results and 
   feed(stepEvent('step/end', { turn: 1, step: 1 }))
   feed(stepEvent('step/start', { turn: 1, step: 2 }))
   feed(stepEvent('tool/call', { turn: 1, step: 2, callId: 'c2', name: 'read', arguments: { file_path: 'E:/x/y.js' } }))
-  feed(stepEvent('tool/result', { turn: 1, step: 2, message: '', error: { message: 'ENOENT' }, meta: {} }))
+  // Production error contract (t34): error carries { name, code } — no message.
+  feed(stepEvent('tool/result', { turn: 1, step: 2, message: '', error: { name: 'EIO', code: 'ENOENT' }, meta: {} }))
   feed(stepEvent('step/end', { turn: 1, step: 2 }))
   feed(stepEvent('turn/end', { reason: 'completed' }))
   await settle()
@@ -296,7 +297,9 @@ test('P1: member run projects one row per tool/call with artifacts, results and 
   const s2 = steps.find((row) => row.step === 2)
   assert.equal(s2.action, 'read')
   assert.equal(s2.artifact, 'E:/x/y.js', 'read file_path artifact')
-  assert.match(String(s2.result), /error: ENOENT/, 'error result attached')
+  // t39/D: assert the PRODUCTION contract shape, not just a substring of the
+  // old message-shaped input (that mismatch is what let t30/t34 defects hide).
+  assert.equal(s2.result, 'error: EIO (ENOENT)', 'production {name, code} detail, got ' + s2.result)
 })
 
 test('P2: missing artifact renders — never a fabricated value', { skip: skipReason }, async () => {
@@ -516,6 +519,29 @@ test('T3: message-shaped error stays compatible (future contract growth)', { ski
   const body = await readSteps(ctx, state)
   const step = body.members[0].steps.find((row) => row.action === 'edit')
   assert.match(String(step.result), /error: X \(Y\): boom detail/, 'name (code): message all shown')
+})
+
+test('T3b: message-only error stays compatible (no name/code present)', { skip: skipReason }, async () => {
+  stepSeq = 0
+  const { ctx, state } = fakeContext({ members: [{ id: 'm-1', activity: 'idle' }] })
+  host.apply(ctx)
+  await new Promise((resolve) => setTimeout(resolve, 150))
+  const feed = (event) => emit(state, 'session/event', { id: 'm-1' }, event)
+
+  feed(stepEvent('turn/start', {}))
+  feed(stepEvent('step/start', { turn: 1, step: 1 }))
+  feed(stepEvent('tool/call', { turn: 1, step: 1, callId: 'c1', name: 'read', arguments: '{"file_path":"E:/q"}' }))
+  // Legacy / hypothetical contract: message only, no name, no code.
+  feed(stepEvent('tool/result', { turn: 1, step: 1, message: '', error: { message: 'legacy detail' }, meta: {} }))
+  feed(stepEvent('step/end', { turn: 1, step: 1 }))
+  feed(stepEvent('turn/end', { reason: 'completed' }))
+  await settle()
+
+  const body = await readSteps(ctx, state)
+  const step = body.members[0].steps.find((row) => row.action === 'read')
+  assert.equal(step.result, 'error: legacy detail', 'message-only compat must not lose the detail')
+  const stateBody = await readState(ctx, state)
+  assert.equal(stateBody.errorDetailMisses, 0, 'a message-only error is NOT a miss')
 })
 
 test('T4: /state exposes errorDetailMisses alongside the other counters', { skip: skipReason }, async () => {
