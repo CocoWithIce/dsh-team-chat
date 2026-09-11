@@ -74,7 +74,7 @@ function shallowEqual(a, b) {
 }
 
 /** Evaluate the bundle and return its exports. */
-async function loadClientExports() {
+async function loadClientExports(options) {
   const source = await readFile(join(ROOT, 'lib/client.js'), 'utf8')
   const loaded = { definition: null }
   const windowStub = {
@@ -88,9 +88,10 @@ async function loadClientExports() {
     if (name === 'react') return ReactShim
     throw new Error('unexpected require: ' + name)
   }
+  const fetchStub = (options && options.fetch) || (() => Promise.resolve({ ok: true }))
   // eslint-disable-next-line no-new-func
   const evaluate = new Function('window', 'console', 'fetch', 'setInterval', 'clearInterval', 'setTimeout', source)
-  evaluate(windowStub, console, () => Promise.resolve({ ok: true }), () => 0, () => {}, () => 0)
+  evaluate(windowStub, console, fetchStub, () => 0, () => {}, () => 0)
 
   assert.ok(loaded.definition !== null, 'bundle did not call window.__ModuleLoader__.load')
   assert.equal(loaded.definition.id, 'dsh-team-chat')
@@ -552,7 +553,7 @@ test('t20: jumpToSubagent exercises the exact public call shape (subagentAddress
       opened.push(address)
     },
   }
-  const result = internals.jumpToSubagent({ get: (name) => (name === 'sessions' ? fakeSessions : undefined) }, 'member-9')
+  const result = await internals.jumpToSubagent({ get: (name) => (name === 'sessions' ? fakeSessions : undefined) }, 'member-9')
   assert.equal(result.ok, true)
   assert.deepEqual(calls.map((c) => c[0]), ['subagentAddress', 'openSubagent'],
     'must resolve the address first, then open it')
@@ -566,24 +567,24 @@ test('t20: jumpToSubagent degrades instead of throwing', async () => {
   const jump = internals.jumpToSubagent
   // 1a) t44/P0: NO ctx at all → 'no-ctx' (our dropped context — the tab wrapper
   //     used to discard props.ctx — never blamed on the platform).
-  const noCtx = jump(undefined, 'm-1')
+  const noCtx = await jump(undefined, 'm-1')
   assert.equal(noCtx.ok, false)
   assert.equal(noCtx.reason, 'no-ctx')
   // 1b) ctx present but the sessions service really is absent → 'no-service'.
-  const noService = jump({ get: () => undefined }, 'm-1')
+  const noService = await jump({ get: () => undefined }, 'm-1')
   assert.equal(noService.ok, false)
   assert.equal(noService.reason, 'no-service')
-  // 2) service but no address → no-address, keeps sessionId
-  const noAddress = jump({ get: () => ({ subagentAddress: () => undefined, openSubagent: () => {} }) }, 'm-1')
+  // 2) service but no address and no open() → no-address, keeps sessionId
+  const noAddress = await jump({ get: () => ({ subagentAddress: () => undefined }) }, 'm-1')
   assert.equal(noAddress.ok, false)
   assert.equal(noAddress.reason, 'no-address')
   assert.equal(noAddress.sessionId, 'm-1')
   // 3) openSubagent throws → open-failed, no throw
-  const openThrows = jump({ get: () => ({ subagentAddress: () => ({ parentSessionId: 'p', childSessionId: 'm-1', mode: 'continuable' }), openSubagent: () => { throw new Error('not healthy') } }) }, 'm-1')
+  const openThrows = await jump({ get: () => ({ subagentAddress: () => ({ parentSessionId: 'p', childSessionId: 'm-1', mode: 'continuable' }), openSubagent: () => { throw new Error('not healthy') } }) }, 'm-1')
   assert.equal(openThrows.ok, false)
   assert.equal(openThrows.reason, 'open-failed')
   // 4) happy path
-  const ok = jump({ get: () => ({ subagentAddress: () => ({ parentSessionId: 'p', childSessionId: 'm-1', mode: 'continuable' }), openSubagent: (address) => { globalThis.__opened = address } }) }, 'm-1')
+  const ok = await jump({ get: () => ({ subagentAddress: () => ({ parentSessionId: 'p', childSessionId: 'm-1', mode: 'continuable' }), openSubagent: (address) => { globalThis.__opened = address } }) }, 'm-1')
   assert.equal(ok.ok, true)
 })
 
@@ -693,4 +694,243 @@ test('t44/P0: the diagnostics line states WHO is at fault for the jump path (pro
 
   const svcUp = render({ get: (name) => (name === 'sessions' ? { subagentAddress: () => undefined, openSubagent: () => {} } : undefined) })
   assert.match(svcUp, /svc:可用/, 'ctx + sessions present ⇒ jumps can work: ' + svcUp)
+})
+
+// ---------------------------------------------------------------- t44: two-page settings + catalog pickers
+
+test('t44: CapList renders every catalog state honestly (never an empty list on failure)', async () => {
+  const internals = (await loadClientExports()).__internals
+  const text = (props) => renderTree(internals.CapList(props)).join('\n')
+
+  const loading = text({ label: 'Skills', state: 'loading', items: [], values: ['understand'] })
+  assert.match(loading, /清单加载中…/, 'loading state is explicit')
+  assert.match(loading, /understand · 自定义（保留）/, 'legacy value retained during loading')
+
+  const failed = text({ label: 'Skills', state: 'failed', reason: 'boom', items: [], values: [], onRetry: () => {} })
+  assert.match(failed, /清单加载失败：boom/, 'failure shows the cause')
+  assert.match(failed, /重试/, 'failure offers a retry path')
+  assert.ok(!/确无可用项/.test(failed), 'failure is NOT presented as a genuine empty list')
+
+  const unavailable = text({ label: 'MCP', state: 'unavailable', reason: 'no-service', items: [], values: ['postgres'] })
+  assert.match(unavailable, /不提供 MCP 清单/, 'unavailable is explicit and explains itself')
+  assert.match(unavailable, /postgres · 自定义（保留）/, 'legacy value retained when no catalog exists')
+
+  const empty = text({ label: 'Skills', state: 'empty', items: [], values: [] })
+  assert.match(empty, /确无可用项/, 'a genuine empty state is a distinct message')
+
+  const ok = text({ label: 'Skills', state: 'ok', items: ['understand', 'code-review'], values: ['understand'], onToggle: () => {}, onManual: () => {} })
+  assert.match(ok, /understand/, 'catalog items render as pickers')
+  assert.match(ok, /code-review/, 'every catalog item is offered')
+})
+
+test('t44: CapList keeps legacy free-text values as 自定义（保留） chips (no data loss)', async () => {
+  const internals = (await loadClientExports()).__internals
+  const out = renderTree(internals.CapList({
+    label: 'Skills', state: 'ok', items: ['understand'], values: ['legacy-thing', 'understand'],
+    onToggle: () => {}, onManual: () => {},
+  })).join('\n')
+  assert.match(out, /legacy-thing · 自定义（保留）/, 'legacy value not in the catalog stays visible')
+  assert.match(out, /understand/, 'catalog value stays a toggle chip')
+})
+
+test('t44: MembersPage renders the guidance-level note, picks the first team+member, and shows loading catalogs', async () => {
+  const internals = (await loadClientExports()).__internals
+  const teams = [{ id: 't1', name: 'T1', members: [{ name: 'alpha', role: '', provider: '', model: '', reasoningEffort: '', soul: '', skills: ['understand'], plugins: [], mcp: [], memory: '', executionPrompt: '' }] }]
+  const out = renderTree(internals.MembersPage({ teams, onPatchMember: () => {} })).join('\n')
+  assert.match(out, /指引级说明/, 'the guidance-level honesty note is present')
+  assert.ok(out.includes('不是工具层强制'), '...and explicitly says not tool-layer enforced')
+  assert.match(out, /T1/, 'first team is selected')
+  assert.match(out, /alpha/, 'first member is selected')
+  assert.match(out, /清单加载中…/, 'catalog load state is explicit (loading), never an empty list')
+  assert.match(out, /Skills/, 'skills picker label present')
+  assert.match(out, /MCP/, 'mcp picker label present')
+})
+
+test('t44: MembersPage empty state points back to the teams page', async () => {
+  const internals = (await loadClientExports()).__internals
+  const out = renderTree(internals.MembersPage({ teams: [], onPatchMember: () => {} })).join('\n')
+  assert.match(out, /还没有团队模板/, 'no teams ⇒ clear empty-state guidance')
+})
+
+test('t44: SettingsPage renders the two-page nav (团队 / 成员)', async () => {
+  const internals = (await loadClientExports()).__internals
+  const out = renderTree(internals.SettingsPage()).join('\n')
+  assert.match(out, /团队群聊/, 'page header present')
+  assert.match(out, /团队模板/, 'teams page content renders by default')
+  assert.match(out, /启用团队功能/, 'teams-page switches render on the teams page')
+})
+
+test('t44: loadCatalogs maps endpoints that only answer { ok } to an honest failed state', async () => {
+  const internals = (await loadClientExports()).__internals
+  const calls = []
+  globalThis.__t44catalog = (caps) => calls.push(caps)
+  try {
+    await internals.loadCatalogs() // default fetch stub resolves { ok:true } with no .json() → both chains fail
+  } finally {
+    delete globalThis.__t44catalog
+  }
+  assert.equal(calls.length, 1, 'loader reports exactly once')
+  assert.equal(calls[0].skills.state, 'failed', 'skills chain failure surfaced (never a phantom empty list)')
+  assert.deepEqual(calls[0].skills.items, [], 'failed skills carry no items')
+  assert.equal(calls[0].mcp.state, 'failed', 'mcp chain failure surfaced')
+  assert.deepEqual(calls[0].mcp.items, [], 'failed mcp carries no items')
+})
+
+test('t44: loadCatalogs surfaces real catalogs when the endpoints answer', async () => {
+  const calls = []
+  globalThis.__t44catalog = (caps) => calls.push(caps)
+  const fetchStub = (url, init) => {
+    if (String(url).endsWith('/capabilities')) {
+      return Promise.resolve({ json: () => Promise.resolve({ ok: true, capabilities: { skills: { state: 'ok', reason: '', items: ['understand', 'diag-bug'] } } }) })
+    }
+    const body = JSON.parse((init && init.body) || '{}')
+    assert.equal(body.method, 'catalog', 'mcp fetch uses the documented catalog method')
+    return Promise.resolve({ json: () => Promise.resolve({ ok: true, items: [{ id: 'postgres', name: 'Postgres' }, { id: 'openalex', name: 'OpenAlex' }] }) })
+  }
+  try {
+    const exports = await loadClientExports({ fetch: fetchStub })
+    await exports.__internals.loadCatalogs()
+  } finally {
+    delete globalThis.__t44catalog
+  }
+  assert.equal(calls.length, 1, 'loader reported once')
+  assert.deepEqual(calls[0].skills, { state: 'ok', reason: '', items: ['understand', 'diag-bug'] }, 'skills catalog flowed through')
+  // t46: MCP items carry { name, tag } with the THREE-state label. The stub rows
+  // have no connection facts → connected=[] → 货架（未连接）.
+  assert.equal(calls[0].mcp.state, 'ok', 'mcp catalog flowed through')
+  assert.deepEqual(calls[0].mcp.items.map((item) => item.name), ['Postgres', 'OpenAlex'], 'mcp names from the documented catalog shape')
+  assert.deepEqual(calls[0].mcp.items.map((item) => item.tag), ['货架（未连接）', '货架（未连接）'], 'unconnected catalog rows are honestly labeled as shelf-only')
+})
+
+test('t46: loadCatalogs maps MCP connection facts to the three-state labels', async () => {
+  const calls = []
+  globalThis.__t44catalog = (caps) => calls.push(caps)
+  const fetchStub = (url) => {
+    if (String(url).endsWith('/capabilities')) {
+      return Promise.resolve({ json: () => Promise.resolve({ ok: true, capabilities: { skills: { state: 'empty', reason: '', items: [] } } }) })
+    }
+    return Promise.resolve({ json: () => Promise.resolve({ ok: true, items: [
+      { id: 'a', name: 'Shelfy', connected: [] },
+      { id: 'b', name: 'Configy', connected: ['k1'], connectionState: 'reauth' },
+      { id: 'c', name: 'Healthy', connected: ['k2'], connectionState: 'healthy' },
+    ] }) })
+  }
+  try {
+    const exports = await loadClientExports({ fetch: fetchStub })
+    await exports.__internals.loadCatalogs()
+  } finally {
+    delete globalThis.__t44catalog
+  }
+  const tags = Object.fromEntries(calls[0].mcp.items.map((item) => [item.name, item.tag]))
+  assert.equal(tags.Shelfy, '货架（未连接）', 'connected empty ⇒ shelf only')
+  assert.equal(tags.Configy, '已配置（状态：reauth）', 'connected but not healthy ⇒ configured, never ready')
+  assert.equal(tags.Healthy, '已连接可用', 'connected + healthy ⇒ usable')
+  assert.equal(calls[0].mcp.state, 'ok')
+})
+
+// ---------------------------------------------------------------- t53: jump resolves via open() (catalog), not retained addresses
+
+test('t53: jumpToSubagent resolves a never-visited member via open() — the retained-address-only path is the bug', async () => {
+  const internals = (await loadClientExports()).__internals
+  const opened = []
+  // The pre-t53 behaviour: `subagentAddress` reads ONLY the retained-addresses
+  // map (manager.js:128-130) and never resolves a first-time member → old code
+  // returned no-address. The fix falls through to open(id) → manager.select →
+  // navigationAddress over loaded catalogs (manager.js:85-100/136-147).
+  const sessions = {
+    subagentAddress: () => undefined,   // NEVER visited → no retained address
+    open: (id) => { opened.push(id) },
+    openSubagent: () => { throw new Error('must not be consulted') },
+  }
+  const result = await internals.jumpToSubagent({ get: (name) => (name === 'sessions' ? sessions : undefined) }, 'member-9')
+  assert.equal(result.ok, true, 'a first-time click must succeed via open(id)')
+  assert.deepEqual(opened, ['member-9'], 'open() receives the member id')
+})
+
+test('t53: jumpToSubagent keeps the retained-address fast path (openSubagent)', async () => {
+  const internals = (await loadClientExports()).__internals
+  const calls = []
+  const address = { parentSessionId: 'cap-1', childSessionId: 'm-1', mode: 'continuable' }
+  const sessions = {
+    subagentAddress: () => address,
+    open: (id) => { calls.push(['open', id]) },
+    openSubagent: (a) => { calls.push(['openSubagent', a]) },
+  }
+  const result = await internals.jumpToSubagent({ get: () => sessions }, 'm-1')
+  assert.equal(result.ok, true)
+  assert.deepEqual(calls.map((c) => c[0]), ['openSubagent'], 'a retained address takes the openSubagent fast path')
+})
+
+test('t53: jumpToSubagent maps unknown-session throws to no-catalog (no parent, directory not loaded)', async () => {
+  const internals = (await loadClientExports()).__internals
+  const sessions = {
+    subagentAddress: () => undefined,
+    open: () => { throw new Error('sessions.select: unknown session m-9') },
+  }
+  const result = await internals.jumpToSubagent({ get: () => sessions }, 'm-9')
+  assert.equal(result.ok, false)
+  assert.equal(result.reason, 'no-catalog', 'unloaded directory ⇒ distinct reason, never "left the team"')
+  assert.ok(String(result.detail).includes('unknown session'), 'the platform error is carried for diagnostics')
+})
+
+test('t53: jumpToSubagent degrades to no-address when open() is absent entirely', async () => {
+  const internals = (await loadClientExports()).__internals
+  const sessions = { subagentAddress: () => undefined }
+  const result = await internals.jumpToSubagent({ get: () => sessions }, 'm-1')
+  assert.equal(result.ok, false)
+  assert.equal(result.reason, 'no-address', 'no open, no address ⇒ honest no-address')
+})
+
+// ---------------------------------------------------------------- t61: on-demand parent-catalog load + one-shot retry
+
+test('t61: first click succeeds even when the parent catalog was never loaded (refresh on demand)', async () => {
+  const internals = (await loadClientExports()).__internals
+  let refreshes = 0
+  const opened = []
+  // The host roster supplies parentSessionId='cap-1'. `open` throws BEFORE any
+  // catalog refresh (simulating an unloaded catalog) and succeeds AFTER it.
+  const sessions = {
+    subagentAddress: () => undefined,
+    refreshSubagents: async (parent) => { refreshes += 1 },
+    open: (id) => {
+      if (refreshes === 0) throw new Error('sessions.select: unknown session m-1')
+      opened.push(id)
+    },
+    openSubagent: () => { throw new Error('must not be consulted') },
+  }
+  const result = await internals.jumpToSubagent({ get: () => sessions }, 'm-1', 'cap-1')
+  assert.equal(result.ok, true, 'first click succeeds after on-demand parent-catalog load')
+  assert.ok(refreshes >= 1, 'refreshSubagents(parent) fired on demand')
+  assert.deepEqual(opened, ['m-1'], 'open() resolves the member after the catalog is loaded')
+})
+
+test('t61: jumpToSubagent retries open once after a second refresh, never gives up immediately', async () => {
+  const internals = (await loadClientExports()).__internals
+  let refreshCalls = 0
+  let openCalls = 0
+  const sessions = {
+    subagentAddress: () => undefined,
+    refreshSubagents: async () => { refreshCalls += 1 },
+    open: () => {
+      openCalls += 1
+      if (openCalls === 1) throw new Error('sessions.select: unknown session slow-catalog')
+    },
+  }
+  const result = await internals.jumpToSubagent({ get: () => sessions }, 'm-1', 'cap-1')
+  assert.equal(result.ok, true, 'the one-shot retry succeeds')
+  assert.equal(openCalls, 2, 'open attempted exactly twice: ' + openCalls)
+  assert.ok(refreshCalls >= 2, 'catalog refreshed before each attempt')
+})
+
+test('t61: jumpToSubagent degrades honestly to no-catalog when the catalog never resolves', async () => {
+  const internals = (await loadClientExports()).__internals
+  const sessions = {
+    subagentAddress: () => undefined,
+    refreshSubagents: async () => {},
+    open: () => { throw new Error('sessions.select: unknown session ghost') },
+  }
+  const result = await internals.jumpToSubagent({ get: () => sessions }, 'ghost', 'cap-1')
+  assert.equal(result.ok, false)
+  assert.equal(result.reason, 'no-catalog', 'refresh + retry exhausted ⇒ honest no-catalog')
+  assert.ok(String(result.detail).includes('unknown session'), 'platform error retained for diagnostics')
 })

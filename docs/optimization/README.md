@@ -27,6 +27,8 @@
 |---|---|---|
 | `client-sessions-access.md` | t23 | sessions 是客户端运行时根服务；我方只需在 lib/client.js 的 exports.inject 加 'sessions'（无需补 inject 包）；t20 跳转子代理会话前提成立，含三条降级链。 |
 | `stall-detection-feasibility.md` | t22 | 兄弟插件读不到任务 claimed 状态（直读不可行）；弱替代=成员 idle + 消息级事件超阈值标「疑似停滞」；恢复经队长的唯一权威通道。 |
+| `detach-p1-state-design.md` | t47/t49/t51/t52/t58 | P1 状态层自研设计稿（v3 修订，待评审）：任务 schema / 状态机（supersededBy 链 + 双路径 reclaim：claimed→回收、running→suspended）/ 依赖失效 / 可判定性 / API / 持久化 / 过渡共存；t49/t52 复核 + F1-F3 处置于文末「复核意见与处置」节。 |
+| `captain-tool-surface.md` | t48/t55 | 队长工具面调研（样本内）：44 会话/575 次快照统计；语义分层（不可替代 3 项 / 可自动化 5 项 / 样本内零调用 3 项）；errors=0 ≠ 机制安全的原始口径；坑→保护设计映射。 |
 
 ## 测量脚本
 

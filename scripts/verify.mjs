@@ -147,7 +147,19 @@ const hostSource = await readFile(join(ROOT, 'lib/index.js'), 'utf8')
 check('host exports name/inject/apply', /export const name/.test(hostSource) && /export const inject/.test(hostSource) && /export function apply/.test(hostSource))
 check('host serves /state, /speak, /task', ['/state', '/speak', '/task'].every((suffix) => hostSource.includes(`ROUTE_PREFIX + '${suffix}'`)))
 check('host serves the step projection route', hostSource.includes(`ROUTE_PREFIX + '/steps'`))
+check('host serves the capability catalog route (t44)', hostSource.includes(`ROUTE_PREFIX + '/capabilities'`) && /ctx\.get\(['"]skills['"]\)/.test(hostSource),
+  'the member page must enumerate REAL skills, never a fabricated list')
 check('host fences every route', hostSource.includes('requestRejection'))
+
+// ---------------------------------------------------------------- t44: capability pickers (honesty guard)
+process.stdout.write('\n[client capability guard]\n')
+check('client consumes the /capabilities route', clientSource.includes(`BASE + '/capabilities'`))
+check('client consumes the mcp-connector catalog API', clientSource.includes("'/mcp-connector/api'") && clientSource.includes("method: 'catalog'"),
+  'MCP enumeration goes through the documented web API whitelist (t43 §2)')
+check('client marks guidance-level config explicitly', clientSource.includes('指引级') && clientSource.includes('不是工具层强制'),
+  '“looks enabled but is not” switches are forbidden (t44)')
+check('client distinguishes load failure from genuine emptiness', clientSource.includes('清单加载失败') && clientSource.includes('确无可用项'))
+check('client retains legacy free-text values as explicit chips', clientSource.includes('自定义（保留）'))
 
 // ---------------------------------------------------------------- host perf guard (P1a)
 process.stdout.write('\n[host perf guard]\n')

@@ -110,6 +110,7 @@ function fakeContext(options = {}) {
       if (name === 'connection') return { requestRejection: () => undefined }
       if (name === 'systemPrompt') return { section: () => () => {} }
       if (name === 'sessions') return { get: () => undefined }
+      if (name === 'skills') return options.skillsService
       return undefined
     },
   }
@@ -553,4 +554,66 @@ test('T4: /state exposes errorDetailMisses alongside the other counters', { skip
   assert.equal(typeof body.errorDetailMisses, 'number')
   assert.equal(typeof body.artifactParseFailures, 'number')
   assert.equal(typeof body.timeouts, 'number')
+})
+
+// ---------------------------------------------------------------- t44: /capabilities (real skill catalog, honest states)
+
+/** Drive the real /capabilities route with a fake request/response pair. */
+async function readCapabilities(ctx, state) {
+  const route = state.routes.find((candidate) => String(candidate.path).includes('/capabilities'))
+  assert.ok(route !== undefined, '/capabilities route must be registered')
+  const res = {
+    writeHead() {},
+    end(value) { this.body = JSON.parse(value) },
+    json() { return this.body },
+  }
+  await route.handler({ url: '/plugins/dsh-team-chat/capabilities', method: 'GET' }, res)
+  return res.json()
+}
+
+test('T5: /capabilities reports honest states — unavailable when no skills service exists', { skip: skipReason }, async () => {
+  const { ctx, state } = fakeContext() // no 'skills' service on this fake ctx
+  host.apply(ctx)
+  await new Promise((resolve) => setTimeout(resolve, 150))
+  const body = await readCapabilities(ctx, state)
+  assert.equal(body.ok, true)
+  assert.equal(body.capabilities.skills.state, 'unavailable', 'no service ⇒ explicit unavailable')
+  assert.equal(body.capabilities.skills.reason, 'no-service')
+  assert.deepEqual(body.capabilities.skills.items, [], 'unavailable carries no fabricated items')
+})
+
+test('T6: /capabilities surfaces the REAL skill catalog when the service answers', { skip: skipReason }, async () => {
+  const { ctx, state } = fakeContext({
+    skillsService: { list: async () => [{ name: 'understand' }, { name: 'diag-bug' }, { name: '' }] },
+  })
+  host.apply(ctx)
+  await new Promise((resolve) => setTimeout(resolve, 150))
+  const body = await readCapabilities(ctx, state)
+  assert.equal(body.capabilities.skills.state, 'ok')
+  assert.deepEqual(body.capabilities.skills.items, ['understand', 'diag-bug'], 'blank names filtered, real names kept')
+  // t61/t45-low: a successful answer must not leak the initial 'no-service'.
+  assert.equal(body.capabilities.skills.reason, '', 'ok state must not carry a failure reason')
+})
+
+test('T8: /state exposes the member\u2019s REAL parent session id (for on-demand catalog load)', { skip: skipReason }, async () => {
+  const { ctx, state } = fakeContext({ members: [{ id: 'm-1', activity: 'idle' }] })
+  host.apply(ctx)
+  await new Promise((resolve) => setTimeout(resolve, 200))
+  const body = await readState(ctx, state)
+  const row = body.members.find((candidate) => candidate.id === 'm-1')
+  assert.ok(row !== undefined, 'member row present')
+  // The fake roster lives under the 'cap-1' captain (fakeContext listChildren).
+  assert.equal(row.parentSessionId, 'cap-1', 'parent must be the roster captainId, not the viewing session')
+})
+
+test('T7: /capabilities maps a throwing skill service to failed, never an empty list', { skip: skipReason }, async () => {
+  const { ctx, state } = fakeContext({
+    skillsService: { list: async () => { throw new Error('skills boom') } },
+  })
+  host.apply(ctx)
+  await new Promise((resolve) => setTimeout(resolve, 150))
+  const body = await readCapabilities(ctx, state)
+  assert.equal(body.capabilities.skills.state, 'failed')
+  assert.ok(String(body.capabilities.skills.reason).includes('skills boom'), 'failure reason surfaced')
+  assert.deepEqual(body.capabilities.skills.items, [], 'failed never pretends to be empty-but-fine')
 })
