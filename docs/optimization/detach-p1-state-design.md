@@ -88,6 +88,7 @@ pending ──claim(宿主记录 claimedAt)──► claimed ──首次可观�
 - running → stall：lastSignalAt 超阈值 且 宿主观测 agent activity ≠ 进行中（**疑似**，供人工确认）
 - stall → suspended：人工确认中断不可靠 → 置 suspended，**不回收**（防双执行）
 - stalled/suspended → completed/failed：原成员回来结算（attemptId 仍有效）
+- **实现层补充（v4.4 · t75-F6 回填）：`claimed → completed/failed` 直接结算**——成员 claim 后、宿主观测到首次活动（startedAt=null）前，成员可能已物理完成（瞬时任务/快速失败）；禁止该边会迫使实现伪造 running 中间态。该边不与 §4.2 冲突（reclaim 谓词仅对 claimed 开放，与结算路径无关）。
 ```
 
 ### 2.1 四死角的状态机处置（每条可在状态机层面证伪）
@@ -272,15 +273,26 @@ POST /team-tasks/reassign       → { taskId, to, revision }    → 队长重派
 
 - **P1 必做**：claim / update / release（+ reclaim 后台例程）。
 - **P2+**：supersede / reassign 的 UI（状态机先支持）。
+- **v4.4 回填（t75-F1/F2/F3/F4，实现已对齐；仅本节与 §2 改动）**：
+  - **update 域（F1）**：`update` 的 `status` 域 = 上方 :250 形状 `running|completed|failed`；域外值（含 `superseded`/`suspended`）实现层拒绝（`illegal-transition` + `allowedStatus`）——`superseded` 只能走 `/team-tasks/supersede`（其 CAS 内完成 `dependencySupersededAt` 传播），`suspended` 只能走 suspend（人工确认）。带戳传播不可被 update 绕过（S3 恢复有效）。
+  - **claim 依赖前置（F2）**：claim 增加前置——依赖未全 terminal（`dependencyBlocked`，§3 taskOpen 的依赖半边；pending 半边由既有状态检查覆盖）→ 拒绝 `{ ok:false, reason:'dependency-blocked', blockedBy:[...], currentStatus:'pending' }`，不生成 attemptId；`failed`/`superseded` 属 terminal → 解锁（§3 语义在 claim 入口同样成立，t6 死锁消除完整）。
+  - **悬空依赖语义统一（F3）**：唯一就绪语义 = §3「悬空=阻塞」（`dependencyBlocked` 对图外 id 视为阻塞）；环检测（findCycle）只判图内环、图外依赖不参与环计算——两处是分工不是矛盾。入口 `createTask`/`editDependencies` 对悬空依赖**接受但返回 `warnings` 告警**（前向引用合法：id 单调分配，可被未来任务满足；拼错 id 从「静默永不就绪」变为「创建即告警 + 永不就绪可见」）。warnings 为返回元数据，不改动 §1 TaskRecord schema。
+  - **claim 身份（F4）**：claim 写入 `claimedById`/`assignee`（§1 防误认领字段落地），身份由宿主注入（可选参数 `{ claimedById, assignee }`，assignee 显式传入优先、否则由 claimedById 补空）；未提供时保持原值——旧 number 签名完全兼容，既有调用方行为不变。
 
 ---
 
 ## 7. 持久化
 
-- 位置：`<workspace>/.dsh-team/<teamId>/team.json`（**不是** `.agent-teams/`——t22 硬约束：不读 AgentTeams 私有格式，我们的 schema 是唯一真相）。
-- 写策略：`revision` 单调递增；每次状态写原子（读-改-CAS-写）；`fs.rename` 或等效原子替换。
-- 读策略：宿主私有，`/state` 从内存快照投影（t17 事件流驱动），磁盘为持久恢复源。
-- 崩溃恢复：启动时读 `team.json` 重建；reclaim/stall 例程立即重跑（孤儿状态重启后可判定）。
+> **v4.5（t77 · Slice 2 实际落位，裁定 1/2/4）**——本节按实现事实重写；v4.3–v4.4 的原文字以删除线语义由本版取代（差异：位置从 `<workspace>` 相对路径改为 `$DSH_HOME` 绝对路径 + 新增落盘分级与崩溃窗口测试约束）。基线（v4.4 = 5BDBBD0340AF / 56635 B / 512 行）之外仅本节、§11 两行标注处置与落盘记录被改动。
+
+- **位置（裁定 1）**：`$DSH_HOME/dsh-team-chat/<teamId>/team.json`——`$DSH_HOME` 取环境变量 `DSH_HOME`（空缺默认 `~/.dsh`）；`<teamId>` 经 `[A-Za-z0-9._-]` 净化（防路径穿越）。**绝不在仓库/workspace 内**（团队是 DSH 全局概念，不污染用户仓库，符合隐私纪律）；**不读 `.agent-teams/`**——t22 硬约束不变，我们的 schema 是唯一真相。
+- **实例维度（裁定 2）**：P1 单团队单实例（`TaskStore` 单例），`teamId` 仅作为持久化路径的参数接口；活动团队模板切换后新迁移写入新路径（旧文件残存不做迁移，P1 明知）。
+- **写策略（裁定 4 · 分级）**：`revision` 单调递增；每次状态写原子（读-改-CAS-写）；**rename 原子替换任何情况不省**。落盘分两级：
+  - **迁移同步落盘**：claim / update / release / supersede（含例程内的 reclaim、checkUnattended 自动 superseded）成功后立即 `save`（低频、磁盘真相核心）；
+  - **活动信号聚合落盘**：`observeActivity`（session/event 热路径，高频）只置脏标记，由 ≤500ms flush 定时器 + 进程退出前 flush + 外部读持久态前 flush（/state 响应前）收口；崩溃窗口内最多丢窗口内的活动时间戳，**迁移绝不丢、绝不出现半写文件**（tmp+rename 保证）。
+- **读策略**：宿主私有，`/state` 从内存快照投影（t17 事件流驱动）并在响应前收口聚合窗口；磁盘为持久恢复源。
+- **崩溃恢复**：启动时读 `team.json` 重建；reclaim/stall 例程按 `STATE_ROUTINE_MS`（建议初值 30s，D2 需实测）重跑（孤儿状态重启后可判定）；损坏文件**重命名保留现场**（`team.json.corrupt-<ts>`，绝不覆盖）后从空 store 起步并暴露错误。
+- **崩溃窗口测试（裁定 4，已落地）**：`test/team-tasks.test.mjs` Part A——真实子进程在聚合窗口内被 `SIGKILL` → 磁盘 = 迁移态（claim 不丢、活动时间戳丢失允许）；循环原子 save 中途被杀 → 目标文件任意时刻都是完整 JSON。
 
 ---
 
@@ -434,18 +446,18 @@ POST /team-tasks/reassign       → { taskId, to, revision }    → 队长重派
 - t5/t8 当时具体残留状态（claimed vs in_progress，无法从作废记录 100% 回读）
 - **Q2「可被绕过」为逻辑必然（已证），但实际绕过概率取决于未来实现（未测）**——标注推测，非已验证
 - **F2 补充限定（推测）**：`agent.status` 是 **turn 级粒度**（running=整个 turn）；turn 结束瞬间变 idle，若成员在「turn 完成与下次 kick 之间」短暂静默可能被误标——**该窗口的存在性为推测**，需在 P1 实测确认（t59 重点）
-- **F4-b 等效探针（推测）**：若我方无法直读平台的 `activation.accepted` 集合，用 `turn/start` 事件作「已 admitted」信号的**等效是否完整覆盖 accepted→admitted 窗口 = 推测**，需 P1 实测（t59 重点）
+- **F4-b 等效探针（推测）**：若我方无法直读平台的 `activation.accepted` 集合，用 `turn/start` 事件作「已 admitted」信号的**等效是否完整覆盖 accepted→admitted 窗口 = 推测**，需 P1 实测（t59 重点）。**v4.5 处置（t77）**：探针已实现（宿主 memberTurnOpen：turn/start 未消化 → NOT-idle；未知态保守不回收）；运行时部分证据产出（6 个最大真实会话、534 个 turn/start 与 turn/end 严格 1:1、send_message 唤醒后紧邻 turn/start 239/534≈45%，成员会话 2ef3734b 达 58/75=77%——turn/start 按回合边界真实出现且紧跟唤醒）；**accepted→admitted 窗口本身为平台内存微任务级状态、事件日志不可观测 → 本标注如实保留（不许静默当作已验证）**，未知/盲区一律走保守分支（不回收）。
 
 **需实测（D1-D8 + F4）**：
 - `claimLeaseMs`/`stallThresholdMs`/`RECLAIM_CHECK_MS`/`INTERRUPT_CONFIRM_MS`/`MAX_SUPERSEDE_DEPTH`/`SUSPENDED_SETTLE_MS`/`SUSPENDED_UNATTENDED_MS` 全部为**建议初值**
 - 心跳续租 30s/60s（审查员建议）与 §5 的 10min 初值的对比（D7）
 - `ctx.subagents.interrupt` 的可确认语义（D4）——若不可靠 → 默认走 suspended
 - **F2 承重信号（t59 重点）**：长工具调用期间 `agent.status` 取值已由源码证为 running，但需 **P1 运行时确认**（源码≠运行态，见 t52 待核项）
-- **F4-b（t59 重点）**：`stateOf` 或等效探针在 accepted→admitted 窗口是否真返回「不 idle」——需 P1 运行时确认（源码已证平台自身如此实现，我方接入的完整性待实测）
+- **F4-b（t59 重点）**：`stateOf` 或等效探针在 accepted→admitted 窗口是否真返回「不 idle」——需 P1 运行时确认（源码已证平台自身如此实现，我方接入的完整性待实测）。**v4.5 处置（t77）**：部分证据已产出（见「推测」区 v4.5 注）；窗口覆盖证据不可由日志产出 → 标注保留。
 
 ---
 
-> 落盘：t51 v2 → t58 v3 → v4（F4）→ v4.1（t62 收口）→ v4.2（t66 · S13）→ **v4.3（t71 · 指纹归因实测更正）**。本文件取代 t47 的任务 output 作为 P1 状态层设计稿的正式载体；t47 output 保留为历史草稿。v4.1 处置：F2b（§4.1 统一为驱动层二态 idle|running + 层次纪律：`ready` 属工具列表面另一层 + `working` 有效引用 0 处，仅保留「不存在」溯源声明）、hostObservesIdle 第三态处置（未知取值偏保守不回收）、S10（自动 superseded 复用 §6 `/team-tasks/supersede` 同款 CAS、逐字桥接）、S11（环检测范围 = 本 schema 三入口 + 干净重来前提）。修法 7 条（§0）+ 取证纪律 + 层次纪律。不确定性只增不减（见 §11 对比表），未删任何标注。**v4.2 处置 S13（claim 并发原子性）：§6 选修法 (a) `compareAndSet(pending→claimed, rev++)`，非 pending 返回 `task-not-claimable` 且不生成第二个 attemptId；双 owner 结构性不可能；claim 带 revision 豁免已显式声明；不可认领语义表完整（§6）。v4.3 处置指纹归因：:496 括号内被否证归因（「方法不可靠 / 0x0A 编码解释不了」）改为实测归因（Get-Content 默认 gb2312 解码读 UTF-8 无 BOM ⇒ 编码问题），删除伪归因附搜索证据，写入上位规则「机制推理不是证据；推理与实测冲突实测赢」。**
+> 落盘：t51 v2 → t58 v3 → v4（F4）→ v4.1（t62 收口）→ v4.2（t66 · S13）→ **v4.3（t71 · 指纹归因实测更正）**。本文件取代 t47 的任务 output 作为 P1 状态层设计稿的正式载体；t47 output 保留为历史草稿。v4.1 处置：F2b（§4.1 统一为驱动层二态 idle|running + 层次纪律：`ready` 属工具列表面另一层 + `working` 有效引用 0 处，仅保留「不存在」溯源声明）、hostObservesIdle 第三态处置（未知取值偏保守不回收）、S10（自动 superseded 复用 §6 `/team-tasks/supersede` 同款 CAS、逐字桥接）、S11（环检测范围 = 本 schema 三入口 + 干净重来前提）。修法 7 条（§0）+ 取证纪律 + 层次纪律。不确定性只增不减（见 §11 对比表），未删任何标注。**v4.2 处置 S13（claim 并发原子性）：§6 选修法 (a) `compareAndSet(pending→claimed, rev++)`，非 pending 返回 `task-not-claimable` 且不生成第二个 attemptId；双 owner 结构性不可能；claim 带 revision 豁免已显式声明；不可认领语义表完整（§6）。v4.3 处置指纹归因：:496 括号内被否证归因（「方法不可靠 / 0x0A 编码解释不了」）改为实测归因（Get-Content 默认 gb2312 解码读 UTF-8 无 BOM ⇒ 编码问题），删除伪归因附搜索证据，写入上位规则「机制推理不是证据；推理与实测冲突实测赢」。v4.4 处置（t75）：§2 回填 `claimed→completed/failed` 实现层补充边（F6）；§6 回填 update 域限制（F1）、claim 依赖前置 `dependency-blocked`（F2）、悬空依赖语义统一 + 入口 warnings 告警（F3）、claim 写入 `claimedById`/`assignee`（F4）。**基线：v4.3 = SHA256-12 793468AAC0D5 / 54001 B / 506 行；本版改动仅 §2、§6、本落盘记录三处，其余章节零改动。** v4.5 处置（t77 · Slice 2）：**§7 按 P1 实际落位重写**（持久化位置 = `$DSH_HOME/dsh-team-chat/<teamId>/team.json`（裁定 1，绝不进仓库）；P1 单团队单实例 + teamId 参数接口（裁定 2）；落盘分级——迁移同步 / observeActivity 聚合 ≤500ms + 退出 flush + 读持久态前 flush，rename 原子不省，崩溃窗口测试落地（裁定 4））；**§11 两行 F4-b 标注处置**（turn/start 等效探针已实现 + 运行时部分证据产出，accepted→admitted 窗口覆盖不可由日志证明 → 「需实测」如实保留，未知态保守不回收）。**基线：v4.4 = SHA256-12 5BDBBD0340AF / 56635 B / 512 行；本版改动仅 §7、§11（两行标注处置）、本落盘记录，其余章节零改动。**
 
 ---
 
