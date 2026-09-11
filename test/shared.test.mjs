@@ -5,12 +5,16 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import {
   DEFAULT_ROLES,
   DEFAULT_TRIO,
   groupThreads,
   imTargetFromText,
   isTeamLabel,
+  LABEL_PREFIX,
+  LABEL_PREFIX_P2,
+  LABEL_PREFIXES,
   memberPrompt,
   normalizeTeams,
   quoteSnippet,
@@ -23,9 +27,11 @@ import {
 
 // ----------------------------------------------------------------- labels
 
-test('roleFromLabel extracts the member name', () => {
+test('roleFromLabel extracts the member name（双前缀 · t98）', () => {
   assert.equal(roleFromLabel('agent-teams:multi-role-team:researcher'), 'researcher')
   assert.equal(roleFromLabel('agent-teams:t:engineer'), 'engineer')
+  assert.equal(roleFromLabel('dsh-team-chat:trio:researcher'), 'researcher', 'P2 自建前缀同构解析')
+  assert.equal(roleFromLabel('dsh-team-chat:p2e2e:probe1'), 'probe1')
 })
 
 test('roleFromLabel degrades gracefully', () => {
@@ -34,15 +40,33 @@ test('roleFromLabel degrades gracefully', () => {
   assert.equal(roleFromLabel(undefined), 'member')
 })
 
-test('teamFromLabel extracts the team name', () => {
+test('teamFromLabel extracts the team name（双前缀 · t98）', () => {
   assert.equal(teamFromLabel('agent-teams:multi-role-team:reviewer'), 'multi-role-team')
+  assert.equal(teamFromLabel('dsh-team-chat:trio:engineer'), 'trio')
   assert.equal(teamFromLabel('nope'), '')
 })
 
-test('isTeamLabel only accepts the AgentTeams prefix', () => {
-  assert.equal(isTeamLabel('agent-teams:x:y'), true)
+test('isTeamLabel accepts both roster prefixes（存量兼容 + P2 自建 · t98）', () => {
+  assert.equal(LABEL_PREFIX, 'agent-teams:')
+  assert.equal(LABEL_PREFIX_P2, 'dsh-team-chat:')
+  assert.deepEqual(LABEL_PREFIXES, ['dsh-team-chat:', 'agent-teams:'])
+  assert.equal(isTeamLabel('agent-teams:x:y'), true, '存量前缀兼容')
+  assert.equal(isTeamLabel('dsh-team-chat:x:y'), true, 'P2 自建前缀')
   assert.equal(isTeamLabel('agent-team:x:y'), false)
+  assert.equal(isTeamLabel('dsh-team-chat-clone:x:y'), false, '前缀必须整段匹配（含冒号）')
   assert.equal(isTeamLabel(undefined), false)
+  assert.equal(isTeamLabel(''), false)
+})
+
+test('mixed roster: both prefixes pass the same roster gate（混合场景 · t98）', () => {
+  const children = [
+    { label: 'agent-teams:multi-role-team:researcher' },
+    { label: 'dsh-team-chat:trio:engineer' },
+    { label: 'other-plugin:x:y' },
+  ]
+  const roster = children.filter((child) => isTeamLabel(child.label))
+  assert.deepEqual(roster.map((row) => roleFromLabel(row.label)), ['researcher', 'engineer'])
+  assert.deepEqual(roster.map((row) => teamFromLabel(row.label)), ['multi-role-team', 'trio'])
 })
 
 test('roleMeta knows the trio and falls back for strangers', () => {
@@ -172,12 +196,21 @@ test('routingText routes to the team by default', () => {
   assert.match(text, /priority|优先/)
 })
 
-test('routingText asks for automatic approval by default', () => {
-  assert.match(routingText({ autoApproveTeam: true }), /approval="automatic"/)
-  assert.match(routingText({ autoApproveTeam: false }), /approval="required"/)
+test('routingText retires legacy AgentTeams tool guidance（t98 · 判别锚点）', () => {
+  const text = routingText({})
+  // 指引类具体工具名零残留（禁令句使用 agent_teams_* 通配表述，不点名具体工具）
+  for (const legacy of ['agent_teams_create', 'agent_teams_add_member', 'agent_teams_send_message', 'agent_teams_status']) {
+    assert.ok(!text.includes(legacy), `不得再指引使用 ${legacy}`)
+  }
+  // 新语义写入（§9.1.1 三条硬约束进指令文本）
+  assert.match(text, /\/team-tasks/, '新任务一律走 /team-tasks')
+  assert.match(text, /agent_teams_\*/, '保留通配禁令句（不得用 AgentTeams 建队/建成员/派活）')
+  assert.match(text, /dsh-team-chat:/, '自建前缀进文本')
+  assert.match(text, /\/state/, '观察走 P1 /state 投影')
+  assert.match(text, /只读/, '名册保持只读（AgentTeams 只读共存）')
 })
 
-test('routingText drops auto-creation when disabled', () => {
+test('routingText keeps auto-creation off-switch semantics when disabled', () => {
   const text = routingText({ autoCreateTeam: false })
   assert.doesNotMatch(text, /agent_teams_create/)
   assert.match(text, /不自动建队/)
@@ -240,6 +273,15 @@ test('routingText drops the IM broadcast clause when disabled', () => {
 test('routingText always self-excludes subagents', () => {
   assert.match(routingText({}), /子代理/)
   assert.match(routingText({ teams: [] }), /子代理/)
+})
+
+test('shared.js source has zero specific agent_teams_* tool names（grep 验收 · t98 判别锚点）', () => {
+  const source = readFileSync(new URL('../lib/shared.js', import.meta.url), 'utf8')
+  for (const legacy of ['agent_teams_create', 'agent_teams_add_member', 'agent_teams_send_message', 'agent_teams_status']) {
+    assert.ok(!source.includes(legacy), `lib/shared.js 不得残留 ${legacy}（指令退场，禁令句只用通配 agent_teams_*）`)
+  }
+  assert.ok(source.includes('agent_teams_*'), '通配禁令句必须在（不得用 AgentTeams 建队/建成员/派活的显式禁令）')
+  assert.ok(source.includes('/team-tasks'), '新语义必须在（任务一律走 /team-tasks）')
 })
 
 // ----------------------------------------------------------------- IM origin
