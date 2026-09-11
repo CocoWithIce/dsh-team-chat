@@ -134,6 +134,8 @@ check('client requires react', /require\(['"]react['"]\)/.test(clientSource))
 check('client registers the better-sidebar tab', clientSource.includes('registerTab'))
 check('client falls back to shell.overlay', clientSource.includes('shell.overlay'))
 check('client never uses JSX', !/<[A-Z][A-Za-z]*[\s/>]/.test(clientSource.replace(/<[a-z/!]/g, '')))
+check('client tab wrapper forwards ctx to TabView (t44/P0)', clientSource.includes('ctx: props && props.ctx'),
+  'dropping TabComponentProps.ctx silently kills step-jumps with a false "service not mounted"')
 
 // ---------------------------------------------------------------- theming
 process.stdout.write('\n[theming]\n')

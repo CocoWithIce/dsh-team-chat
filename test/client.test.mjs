@@ -564,8 +564,13 @@ test('t20: jumpToSubagent exercises the exact public call shape (subagentAddress
 test('t20: jumpToSubagent degrades instead of throwing', async () => {
   const internals = (await loadClientExports()).__internals
   const jump = internals.jumpToSubagent
-  // 1) no ctx / no service → no-service, no throw
-  const noService = jump(undefined, 'm-1')
+  // 1a) t44/P0: NO ctx at all → 'no-ctx' (our dropped context — the tab wrapper
+  //     used to discard props.ctx — never blamed on the platform).
+  const noCtx = jump(undefined, 'm-1')
+  assert.equal(noCtx.ok, false)
+  assert.equal(noCtx.reason, 'no-ctx')
+  // 1b) ctx present but the sessions service really is absent → 'no-service'.
+  const noService = jump({ get: () => undefined }, 'm-1')
   assert.equal(noService.ok, false)
   assert.equal(noService.reason, 'no-service')
   // 2) service but no address → no-address, keeps sessionId
@@ -666,4 +671,26 @@ test('t39/B: copyText resolves false when no clipboard API exists', async () => 
     assert.equal(await internals.copyText('session-xyz'), false,
       'missing API must report a failure, not a phantom success')
   })
+})
+
+// ---------------------------------------------------------------- t44/P0: jump context honesty
+
+test('t44/P0: the diagnostics line states WHO is at fault for the jump path (probe)', async () => {
+  const internals = (await loadClientExports()).__internals
+  const render = (sessionCtx) => renderTree(internals.ChatBody({
+    config: { pollSeconds: 3 },
+    sessionId: 'session-abc',
+    active: true,
+    sessionCtx: sessionCtx,
+  })).join('\n')
+
+  const noCtx = render(undefined)
+  assert.match(noCtx, /ctx:无/, 'without a client context the line must say ctx missing: ' + noCtx)
+  assert.ok(!noCtx.includes('svc:'), 'no ctx ⇒ no svc claim, never a fake "available"')
+
+  const svcGone = render({ get: (name) => (name === 'sessions' ? undefined : undefined) })
+  assert.match(svcGone, /svc:未挂载/, 'ctx present, sessions absent ⇒ service really missing: ' + svcGone)
+
+  const svcUp = render({ get: (name) => (name === 'sessions' ? { subagentAddress: () => undefined, openSubagent: () => {} } : undefined) })
+  assert.match(svcUp, /svc:可用/, 'ctx + sessions present ⇒ jumps can work: ' + svcUp)
 })
