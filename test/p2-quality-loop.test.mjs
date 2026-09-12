@@ -19,7 +19,7 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { TaskStore } from '../lib/state/task-store.js'
+import { TaskStore, loadTaskStore } from '../lib/state/task-store.js'
 import { MemberRegistry } from '../lib/p2/scheduler-core.js'
 import { QualitySidecar } from '../lib/p2/quality-sidecar.js'
 import {
@@ -327,4 +327,107 @@ test('t110-F1（loop 级）：从未 save 的 sidecar 上 CAS 失败结算 → l
   // F1 修复断言：回滚后无幽灵 gate（未修复版本 load() 无文件分支不清内存 → 残留 needs-revision 幽灵 → 红）
   assert.equal(s.sidecar.gateOf(s.target.id), undefined, '无幽灵 gate（t109-F1）')
   assert.equal(s.sidecar.gates.size, 0)
+})
+
+// ---------------------------------------------------------------- t112 · P4-1 循环创建开关
+
+test('t112-autoLoop=off：needs_revision → 零自动动作（不创建 repair、gate 停 needs-revision）', () => {
+  const s = scenario()
+  const before = s.store.snapshot().tasks.length
+  const result = settleReviewTask({
+    store: s.store, sidecar: s.sidecar, autoLoop: false, now: () => T0 + 10,
+  }, { ...s.deps, ...NEEDS_REVISION })
+  assert.equal(result.ok, true)
+  assert.equal(result.outcome, 'needs-revision')
+  assert.equal(result.autoLoopDisabled, true)
+  // 零自动动作断言：无 repair 任务创建（数量不变）、无派发
+  assert.equal(s.store.snapshot().tasks.length, before, '零自动动作：不创建 repair')
+  assert.equal(s.store.tasks.get(s.review.id).status, 'failed', 'P1 映射仍在（failed）')
+  const gate = s.sidecar.gateOf(s.target.id)
+  assert.equal(gate.gateState, 'needs-revision', 'gate 停 needs-revision 待人工')
+  assert.equal(gate.round, 1)
+  assert.equal(gate.escalation, null, '未触顶也不自动升级（零自动动作）')
+})
+
+test('t112-autoLoop=off：repair completed → 零自动动作（不排队 re-review、gate 停 in-repair）', () => {
+  const s = scenario()
+  // 先用默认（autoLoop on）走完第一轮：needs_revision → repair 创建
+  const first = settleReviewTask({ store: s.store, sidecar: s.sidecar, now: () => T0 + 10 }, { ...s.deps, ...NEEDS_REVISION })
+  s.sidecar.markRepairClaimed(s.target.id, { repairTaskId: first.repairTaskId })
+  const rc = s.store.claim(first.repairTaskId, { assignee: 'eng', claimedById: 'child-eng' }, T0 + 20)
+  const before = s.store.snapshot().tasks.length
+  // 开关关闭：repair completed → 不排队 re-review
+  const result = settleRepairTask({
+    store: s.store, sidecar: s.sidecar, autoLoop: false, now: () => T0 + 30,
+  }, { repairTaskId: first.repairTaskId, status: 'completed', attemptId: rc.attemptId, revision: s.store.tasks.get(first.repairTaskId).revision })
+  assert.equal(result.ok, true)
+  assert.equal(result.outcome, 'repair-completed')
+  assert.equal(result.autoLoopDisabled, true)
+  assert.equal(s.store.snapshot().tasks.length, before, '零自动动作：不创建 re-review')
+  const gate = s.sidecar.gateOf(s.target.id)
+  assert.equal(gate.gateState, 'in-repair', 'gate 停 in-repair 待人工')
+  assert.equal(gate.repairs.length, 1, '审计记录仍在（repairs 追加式）')
+})
+
+test('t112-autoLoop 缺省 = 启用（不传 autoLoop 与传 true 等价）', () => {
+  const s = scenario()
+  const result = settleReviewTask({ store: s.store, sidecar: s.sidecar, now: () => T0 + 10 }, { ...s.deps, ...NEEDS_REVISION })
+  assert.equal(result.outcome, 'repair-created', '缺省（未传）= 启用')
+  const s2 = scenario()
+  const result2 = settleReviewTask({ store: s2.store, sidecar: s2.sidecar, autoLoop: true, now: () => T0 + 10 }, { ...s2.deps, ...NEEDS_REVISION })
+  assert.equal(result2.outcome, 'repair-created', '显式 true = 启用')
+})
+
+// ---------------------------------------------------------------- t116 · F2 跨进程判别
+
+test('t116-F2（跨进程判别）：进程 1 settle+save → 进程 2 全新 sidecar load → settleRepairTask 找到 gate 完成结算', () => {
+  // 模拟跨进程：进程 1（settleReviewTask + save）→ 进程 2（全新 QualitySidecar load → settleRepairTask）
+  const store1 = makeStore()
+  const fs1 = memfs()
+  const sidecar1 = new QualitySidecar({ file: '/team/quality.json', now: () => T0, fs: fs1 })
+  const target = store1.createTask({ kind: 'implementation', subject: 'X', dependencies: [], assignee: 'eng', inScope: ['x.js'], acceptance: ['a'], verify: ['v'] }, T0).task
+  const cc = store1.claim(target.id, { assignee: 'eng', claimedById: 'child-eng' }, T0)
+  store1.update(target.id, { attemptId: cc.attemptId, revision: cc.revision, status: 'completed' }, T0 + 1)
+  sidecar1.openGate(target.id, { maxRounds: 4 })
+  const rv = store1.createTask({ kind: 'review', subject: 'r1', inScope: ['x.js'], dependencies: [target.id], assignee: 'rv' }, T0 + 2).task
+  sidecar1.queueReview(target.id, { reviewTaskId: rv.id })
+  const rc = store1.claim(rv.id, { assignee: 'rv', claimedById: 'child-rv' }, T0 + 3)
+
+  // 进程 1：settle needs_revision → 创建 repair + 设 pendingRepair + save
+  const result1 = settleReviewTask(
+    { store: store1, sidecar: sidecar1, now: () => T0 + 4 },
+    { reviewTaskId: rv.id, verdict: 'needs_revision', findings: [{ id: 'F1', severity: 'medium', problem: 'p', requiredFix: 'f' }], attemptId: rc.attemptId, revision: store1.tasks.get(rv.id).revision },
+  )
+  assert.equal(result1.ok, true)
+  assert.equal(result1.outcome, 'repair-created')
+  assert.ok(result1.repairTaskId)
+
+  // 进程 2：全新 sidecar（从磁盘 load）+ 全新 store——模拟跨进程重启
+  const store2 = loadTaskStore('mem://v2.json', () => JSON.stringify(store1.serialize()))
+  const sidecar2 = new QualitySidecar({ file: '/team/quality.json', now: () => T0, fs: fs1 })
+  // 关键断言：load() 后 pendingRepair 从磁盘恢复（F2 未修复版此处 pendingRepair 丢失 → 后续 gateByRepairTask 返回 undefined）
+  const gate2 = sidecar2.gateOf(target.id)
+  assert.ok(gate2, '进程 2 gate 必须存在')
+  assert.ok(gate2.pendingRepair, 'pendingRepair 必须从磁盘恢复（F2 修复核心断言）')
+  assert.equal(gate2.pendingRepair.repairTaskId, result1.repairTaskId)
+
+  // 进程 2 中间步骤：worker 认领 repair → markRepairClaimed（needs-revision → in-repair）
+  const repair = store2.tasks.get(result1.repairTaskId)
+  const repairClaim = store2.claim(repair.id, { assignee: 'eng', claimedById: 'child-eng' }, T0 + 5)
+  const claimedGate = sidecar2.markRepairClaimed(target.id, { repairTaskId: repair.id })
+  assert.equal(claimedGate.ok, true, 'markRepairClaimed 成功（needs-revision → in-repair）')
+
+  // 进程 2：settleRepairTask 用恢复的 gate 完成结算
+  const result2 = settleRepairTask(
+    { store: store2, sidecar: sidecar2, now: () => T0 + 6 },
+    { repairTaskId: repair.id, status: 'completed', attemptId: repairClaim.attemptId, revision: store2.tasks.get(repair.id).revision, sourceFindingIds: gate2.pendingRepair.sourceFindingIds },
+  )
+  assert.equal(result2.ok, true, JSON.stringify(result2))
+  assert.equal(result2.outcome, 'review-queued', 'repair completed → 自动排队 re-review')
+
+  // 验证 re-review 任务已创建且依赖只指 repair（成功源）
+  const rrTask = store2.tasks.get(result2.reviewTaskId)
+  assert.ok(rrTask, 're-review 任务存在')
+  assert.deepEqual(rrTask.dependencies, [result1.repairTaskId])
+  assert.equal(rrTask.kind, 'review')
 })

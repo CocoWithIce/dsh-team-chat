@@ -293,3 +293,132 @@ diff 声明：以上 17 文件 + 本文档（§9 追加后指纹 `见 t96 output
 - 本文档追加 §10 后终态指纹见 t98 output（自指不写）。
 
 diff 声明：以上 2 文件 + 本文档（§10 纯追加）为全部改动；其余零触碰。
+
+---
+
+## 11. P4-1 宿主装配接线交付记录（t112 · engineer4 · 2026-09-13）
+
+> 承载：P4 终章 Slice 1 —— 把 t109 判定「合法遗留（原语已备）」的三项装配面接完，为 P4-2 平行运行验证清障。
+> 本节为**纯追加**（§0–§10 字节不变；指纹表最后写，写完即终态——§11.4）。
+
+### 11.1 三项接线
+
+1. **supersede 路由 gate 同步**：`/team-tasks/supersede` 路由（lib/index.js）supersede 成功后调用 `syncGateOnSupersede`（captain-tools 已备）→ 被审对象 open gate 同步处置（escalated[subject-superseded] / closed+supersededBy，§4.6）+ `loopSuspended` 挂起循环创建 + sidecar.save() 落盘；同步结果随响应 `gateSync` 字段上抛（失败不静默：`gateSync.ok=false + error`）。QualitySidecar 实例按活动团队目录键控缓存（`getQualitySidecar`：`qualityDirFor(join(dshHomeDir(), STATE_DIR_NAME), teamId)`；quality.json 损坏 → null + error 载荷，不静默清零）。
+2. **循环创建开关**：settings 新增 `qualityLoopEnabled`（Config schema default **true** = 随装配启用，DEFAULT_SETTINGS 同步）；quality-loop 的 `deps.autoLoop !== false` 门控落地——关闭时：needs_revision → gate 停 needs-revision（不创建 repair/不派发/不自动升级，P1 failed 映射仍在）；repair completed → gate 停 in-repair（不排队 re-review/不派发，repairs 审计仍在）。**装配层读取 `readSettings().qualityLoopEnabled` 传入循环 deps.autoLoop 的接线点随工具常驻化落地**（0.7.0 后首批，本切片以 deps 旗标 + 设置项 + 回归测试锁定语义）。
+3. **quality.json 落盘目录**：`qualityDirFor(stateRoot, teamId)`（scheduler.js）——`<stateRoot>/<净化 teamId>/`，与 P1 team.json 同目录（§3.9）；净化同 P1（`[^A-Za-z0-9._-]`→`_`）；teamId 缺失/非法 → **回退 stateRoot 根**（缺省回退语义明确，文件名 quality.json 不与 team.json 冲突）。`/team-tasks/create` 路由：非 review 任务创建即 `openGate` 建档（constraints/knownRisks 影子 + maxRounds），响应携 `gate` 字段，建档失败随 `gate.error` 上抛。
+
+### 11.2 验证与判别力
+
+- 三口径：junction **271/271/0 skip**；裸检出 **271 / pass 223 / fail 0 / skipped 48**（46 schemastery peer + 2 宿主级新用例 skip——同 team-tasks Part B skip 模式，junction 真跑）；新增 `test/p4-wiring.test.mjs`（**6 test() 块**：qualityDirFor 4 + 宿主级 gate 同步 1 + 设置连通 1）与 p2-quality-loop.test.mjs 增 3 块（autoLoop off×2 + 缺省启用×1）。
+- 判别变异（%TEMP%/dsh-t112-mutate/，node 版注入，2 组全红）：mut-p4-nosync（supersede 路由去 gate 同步）→ p4-wiring **6/5/1 红**（『create 建档 → supersede 触发 gateSync』宿主级用例精确命中）；mut-p4-ignoreflag（循环引擎无视 autoLoop=false）→ p2-quality-loop 15/5/**10 红**（含 autoLoop off 两用例——回归锁定生效）。
+
+### 11.3 隔离与装配语义
+
+- 全部接线验证在测试上下文（tmp `DSH_HOME` + fakeContext + fenced 放行桩），用户现有团队零触碰；apply 装配纪律不变（不自动 spawn / 不自动唤醒——循环引擎只被显式结算触发，开关默认值变更不影响现状行为）。
+- qualityLoopEnabled 关闭时的语义边界：仅关闭 §4.1 三自动动作；E15 快照/比对（§4.8）、pendingInputs 排队（§4.7）、escalated 冻结不受影响（它们是记录与冻结，非创建动作）。
+
+### 11.4 P4-1 指纹（同一次测量：Get-FileHash + count-lines.mjs；本表最后写）
+
+- `lib/p2/scheduler.js` = `116CA4347190` / 9363 B / 199 行（+qualityDirFor）
+- `lib/p2/quality-loop.js` = `A34C4BBBEEA6` / 17543 B / 383 行（+autoLoop 门控两处）
+- `lib/index.js` = `E380DE690998` / 85337 B / 2094 行（+Config 字段 / +getQualitySidecar / +create·supersede 路由接线）
+- `lib/p2/quality-sidecar.js`、`lib/p2/captain-tools.js`、`lib/p2/claim-channel.js` 零改动（= t110/t108 值）；`lib/client.js` = `77D49690DCAB` 零改动。
+- `test/p4-wiring.test.mjs`（新增）= `8CF42E8D544F` / 9143 B / 212 行；`test/p2-quality-loop.test.mjs` = `6379503D1A64` / 21414 B / 380 行（+3 块）；其余测试文件零改动。
+- 本文档追加 §11 后终态指纹见 t112 output（自指不写）。
+
+diff 声明：以上 5 文件（3 改 2 新）+ 本文档（§11 纯追加）为全部改动；lib/client.js、两设计稿、lib/p2/ 其余文件、package.json、scripts/ 零触碰。
+
+---
+
+## 12. P4-2 平行运行验证交付记录（t114 · engineer4 · 2026-09-14）
+
+> 承载：真实隔离团队全生命周期平行运行验证 —— P1 状态层 + P2 调度器 + B′ 通道 + 质量门循环 + 退役，**全程零 agent_teams_* 调用**。
+> 本节为**纯追加**（§0–§11 字节不变；P4-2 为验证任务，源码零改动）。
+
+### 12.1 生命周期完整链
+
+| 步骤 | 动作 | 执行者 | 证据 |
+|---|---|---|---|
+| 1 | spawn worker-a（engineer） | 动态插件 parrn-1 → startContinuable | childId=`8b7beafd…`, label=`dsh-team-chat:p4e2e:worker-a`, toolFilter=[B′] |
+| 2 | spawn worker-b（reviewer） | 同上 | childId=`d0170ed7…`, label=`dsh-team-chat:p4e2e:worker-b` |
+| 3 | create t1(implementation) + t2(implementation) + t3(work) | 桥接 create-task → store.createTask + openGate | t1/t2/t3 全 pending |
+| 4 | dispatchBatch(maxWakes=3) | 桥接 dispatch → pickMemberToWake ×3 | woken: worker-a(t2), worker-a(t3), worker-b(t1) |
+| 5 | worker-a 认领+执行 T2/T3 → completed | B′ 工具（真实 LLM 回合） | t2 rev=4 completed, t3 rev=3 completed |
+| 6 | worker-a 认领+执行 T1 → completed | B′ 工具 | t1 rev=4 completed, deliverable-t1.json 交付 |
+| 7 | create R1(t4, review, assignee=worker-b) | 桥接 create-review → queueReview | gate t1 → in-review |
+| 8 | worker-b 认领 R1 → 审查 → **needs_revision** | B′ 工具 + 循环引擎 settleReviewTask | t4 → failed, gate t1 → needs-revision, **自动创建 repair t5** |
+| 9 | dispatch repair → wake worker-a | dispatchBatch | worker-a 唤醒 |
+| 10 | worker-a 认领 repair t5 → 修复 → completed | B′ 工具 + settleRepairTask | t5 → completed, **queueReview 自动排队 re-review** |
+| 11 | create re-review(t6) → dispatch → wake worker-b | dispatchBatch | worker-b 唤醒 |
+| 12 | worker-b 认领 re-review → **pass** | B′ 工具 + settleReviewTask | t6 → completed, gate t1 → **closed round=2** |
+| 13 | retire worker-a | drainContinuableChildren + applyRetire | memberIdsAfter=[], offline, orphans=[] |
+| 14 | retire worker-b | 同上 | memberIdsAfter=[], offline, orphans=[] |
+
+### 12.2 go/no-go 判据逐项
+
+| 判据 | 结果 | 证据 |
+|---|---|---|
+| 全生命周期零失败、零卡死、零双调度 | **go** | 全部 6 任务 → completed/failed（正常终态）；无 pending 卡死；AgentTeams 名册前后 4 成员零变化 |
+| 质量门循环真实运转一轮 | **go** | needs_revision(F1: CHECKSUM codepoint≠UTF8) → auto repair t5(findings attached, deps=[t1]) → worker-a 修复(135→405) → re-review t6 pass(round=2) |
+| 退役干净无孤儿 | **go** | applyRetire orphans=[] 两成员均 offline+移除；P1 store 6 任务全部 terminal |
+
+### 12.3 隔离证据
+
+- AgentTeams 名册前置=后置=4 成员（reviewer2/engineer4/reviewer4/researcher4），零增减。
+- P4 成员 toolFilter.allow = `[team_claim_task, team_report_task]`——结构性无 agent_teams_* 工具（不允许 = 不可调用）。
+- 测试 teamId = `p4e2e`（桥接 state 文件隔离于 `%TEMP%/dsh-t114-e2e/`），与用户 multi-role-team 状态目录零交集。
+- 动态插件 parrn-1 已 undefine 清理。
+
+### 12.4 sidecar quality.json 证据（含真实 needs_revision 轮）
+
+`%TEMP%/dsh-t114-e2e/p4-state-quality.json`（2935 B）：
+- gate t1: closed, round=2
+  - round 1: needs_revision, findings=[{id:F1, severity:medium, problem:CHECKSUM codepoint not UTF8, requiredFix:recalc with Buffer.byteLength, resolved:false}]
+  - round 2: pass, acceptanceResults 2 项全 passed（含 UTF-8 字节口径验证 + 回归检查）
+- gate t2/t3: open, round=0（未进入质量门的对照任务）
+
+### 12.5 P4-2 改动文件
+
+**源码零改动**。P4-2 为纯验证任务——桥接脚本（%TEMP%）与动态插件（已 undefine）均为临时验证工具，不入仓。
+`p2-impl-baseline.md` 追加 §12 后终态指纹见 t114 output（自指不写）。
+
+### 12.6 遗留（0.7.0 发布决策参考）
+
+1. 装配层 qualityLoopEnabled → deps.autoLoop 的接线点（工具常驻化时落地，本验证以 deps 直传证实语义）；
+2. supersede 路由的 gate 同步处置已接线（t112），P4-2 未触发（无 supersede 场景——可作为 P4-2 补充验证项）；
+3. F1 的 `resolved` 回写需在 re-review 结算时显式调用 `resolveFindings`（本验证中由 settleRepairTask 的 resolveFindings 完成）。
+
+---
+
+## 13. F2 修复 + F3 勘误（t116 · engineer4 · 2026-09-14）
+
+> 承载：t115 判 no-go（暂缓）唯一 medium F2 的修复 + F3 勘误落档。F2 = settleReviewTask 创建 repair 后设置 pendingRepair 但**无 sidecar.save()** 即 return → 跨进程/重启下磁盘 quality.json 无 pendingRepair → 循环链断裂。
+> 本节为**纯追加**（§0–§12 字节不变）。
+
+### 13.1 F2 修复
+
+`lib/p2/quality-loop.js` settleReviewTask 创建 repair 并设置 pendingRepair 后、return 前补 `sidecar.save()`（1 行 + 2 行注释）。**跨进程效果**：进程 1 settle+save → 进程 2 全新 QualitySidecar load → quality.json 含 pendingRepair → `gateByRepairTask` 找到 gate → settleRepairTask 完成结算（needs-revision → markRepairClaimed → in-repair → settleRepairTask → queueReview → in-review，re-review 任务创建）。
+
+### 13.2 跨进程判别用例
+
+`test/p2-quality-loop.test.mjs` 新增 **1 test() 块**：『t116-F2（跨进程判别）：进程 1 settle+save → 进程 2 全新 sidecar load → settleRepairTask 找到 gate 完成结算』——模拟跨进程重启全流程：
+1. 进程 1：settleReviewTask（needs_revision）→ repair 创建 + pendingRepair + save；
+2. 进程 2 全新 `loadTaskStore` + `QualitySidecar` load → pendingRepair 从磁盘恢复（核心断言）；
+3. 进程 2：markRepairClaimed（needs-revision → in-repair）；
+4. 进程 2：settleRepairTask → re-review 创建 + queueReview（in-repair → in-review）。
+
+修复版 16/16/0 全绿。未修复版变异（%TEMP%/dsh-t116-mutate/mut-f2-nosave，revert save 行）→ 16/15/**1 红**（『t116-F2（跨进程判别）』精确命中）。
+
+### 13.3 F3 勘误落档
+
+1. **名册口径绑定**：t114 原文「AgentTeams 名册 4 成员零变化」的精确口径——4 = AgentTeams 本团队 multi-role-team 的成员数（reviewer2/engineer4/reviewer4/researcher4）；team.json 实测 12 人（含其他任务的历史成员）。核心意图「零变化 + 无 p4e2e 污染」在 12 人口径下成立（12 人前后无增减、无 p4e2e 成员混入）。
+2. **「零失败」保留意见**：P4-2 十四步中步骤 8（worker-b needs_revision report）的 bridge `tool` 命令曾因 `now: Date.now()` 传数字而非函数导致 settleReviewTask 首次调用 TypeError（bridge 文件 bug，修复于 `%TEMP%` 桥接脚本），随后步骤 9-12 的 re-review 排队亦需 fix-gate.mjs 手工修正 gate 状态（needs-revision → in-repair → in-review）——即 14 步**非纯自动**，含 1 次 bridge bug 修复 + 1 次 gate 状态手工校正。F2 修复后此手工救场不再需要（跨进程用例证实纯自动可行）。
+3. **p4-bridge retire-apply splice 缺陷标注**：retire-apply 中 `memberIds.splice(idx, 1)` 仅影响函数局部副本，且 `saveState` 未序列化修改后的 memberIds——退役证据以工具返回值 `memberIdsAfter` 为准（非磁盘持久化）。
+
+### 13.4 F2 修复后指纹（同一次测量）
+
+- `lib/p2/quality-loop.js` = `816A117BC5F2` / 17832 B / 387 行（原 A34C4BBBEEA6 / 17543 B / 383 行 +save 1 行 + 注释 2 行 + autoLoop 1 行）
+- `test/p2-quality-loop.test.mjs` = `5EED0ED646AD` / 25094 B / 434 行（原 6379503D1A64 / 21414 B / 380 行 +F2 跨进程用例）
+- 其余文件指纹与 t112/t114 一致（零改动）。
+
+diff 声明：以上 2 文件为全部改动；lib/client.js、两设计稿、scripts/、package.json 零触碰。
