@@ -31,6 +31,12 @@
 | `captain-tool-surface.md` | t48/t55 | 队长工具面调研（样本内）：44 会话/575 次快照统计；语义分层（不可替代 3 项 / 可自动化 5 项 / 样本内零调用 3 项）；errors=0 ≠ 机制安全的原始口径；坑→保护设计映射。 |
 | `detach-p2-scheduler-design.md` | t79/t82/t86/t87/t89 | P2 调度器 + 队长工具面设计稿（v0.7，t89 收口修订，待复核）：九条真实事故→设计约束映射；调度模型（宿主管唤醒/成员管认领）；成员可用性状态机与熔断（含 standby 交接态）；同角色多开（命名规范 `<role>-i<idx>` 与轮换代正交、单实例唤醒策略、per-instance 熔断）；轮换四步流程（含 attemptId 双通道交接）；4 工具与 P1 API 映射；routingText 解耦（t80 耦合地图五类三级已并入）；防双调度（§9.1.1）；suspended 30min 硬约束 + reassign 快速路径（§4.2）；过渡共存与 P4 切换条件。 |
 
+## 质量门产品化（P3）
+
+| 文档 | 任务 | 一句话结论 |
+|---|---|---|
+| `detach-p3-quality-gates-design.md` | t100/t102 | P3 质量门设计稿（v0.2，t102 repair-round-2 修订，待复核）：契约四件套/findings/verdict 三值/round 的 sidecar schema（扩展列 vs sidecar 分层裁决，零 P1 破坏）；needs_revision→repair→re-review 循环语义（依赖只指成功源、去重/取代、输入排队、升级期冻结）；结构化升级裁定替代卡死 escalated；8 条本会话真实事故→设计约束映射；H7「不自动开 repair」显式取代声明（四重安全阀，P2 行修订由独立任务承载 G9）；create 层 gate-busy 校验；supersede gate 同步处置（subject-superseded）；sidecar 写失败补偿契约化（N=3）。 |
+
 ## 测量脚本
 
 | 脚本 | 用途 |

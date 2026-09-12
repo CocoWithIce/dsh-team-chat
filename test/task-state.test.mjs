@@ -483,3 +483,63 @@ test('t75-F4: claim 写入 claimedById/assignee（§1 防误认领），旧签�
   assert.equal(store.tasks.get(t3.id).claimedById, null, '旧签名不写 claimedById（向后兼容）')
   assert.equal(store.tasks.get(t3.id).assignee, 'r9', '旧签名不改 assignee')
 })
+
+// ---------------------------------------------------------------- t106 · schema v2（P3 契约四件套收编）
+
+test('t106-v2: createTask 收编 constraints/knownRisks 扩展列（缺省空数组，旧调用零感知）', () => {
+  const store = makeStore(T0)
+  const t = store.createTask({
+    subject: '带契约的任务',
+    dependencies: [],
+    assignee: 'eng',
+    constraints: ['node>=22', '不引入新依赖'],
+    knownRisks: ['LLM 配额耗尽', '外部 API 不可用'],
+  }, T0).task
+  assert.deepEqual(t.constraints, ['node>=22', '不引入新依赖'], 'constraints 列收编')
+  assert.deepEqual(t.knownRisks, ['LLM 配额耗尽', '外部 API 不可用'], 'knownRisks 列收编')
+  // 旧形态调用（无这两字段）→ 缺省空数组，零感知
+  const legacy = store.createTask({ subject: '旧形态', dependencies: [], assignee: '' }, T0 + 1).task
+  assert.deepEqual(legacy.constraints, [])
+  assert.deepEqual(legacy.knownRisks, [])
+  // 非字符串项被过滤（列表规整）
+  const dirty = store.createTask({ subject: 'd', dependencies: [], constraints: ['ok', 42, null], assignee: '' }, T0 + 2).task
+  assert.deepEqual(dirty.constraints, ['ok'])
+})
+
+test('t106-v2: serialize 携带 schemaVersion=2；snapshotRow 投影含两列', () => {
+  const store = makeStore(T0)
+  const t = store.createTask({ subject: 'x', dependencies: [], constraints: ['c1'], knownRisks: ['r1'], assignee: '' }, T0).task
+  const serialized = store.serialize()
+  assert.equal(serialized.schemaVersion, 2, '版本化声明（P1 契约增量清单见 p3-impl-baseline.md）')
+  const row = store.snapshotRow(t.id)
+  assert.deepEqual(row.constraints, ['c1'])
+  assert.deepEqual(row.knownRisks, ['r1'])
+})
+
+test('t106-v2: v1 旧文件零迁移兼容（缺列补空数组，schemaVersion 记录磁盘版本）', () => {
+  const store = makeStore(T0)
+  const t = store.createTask({ subject: 'persist-v2', dependencies: [], constraints: ['keep-me'], assignee: 'r1' }, T0).task
+  const files = new Map()
+  store.save('/t/team.json', {
+    write(tmp, payload) { files.set(tmp, payload) },
+    rename(tmp, path) { files.set(path, files.get(tmp)); files.delete(tmp) },
+  })
+  // 模拟 v1 文件：剥掉 schemaVersion 与 v2 列
+  const raw = JSON.parse(files.get('/t/team.json'))
+  const v1 = { nextSeq: raw.nextSeq, options: raw.options, tasks: {} }
+  for (const [id, record] of Object.entries(raw.tasks)) {
+    const { constraints, knownRisks, ...rest } = record
+    void constraints
+    void knownRisks
+    v1.tasks[id] = rest
+  }
+  files.set('/t/team-v1.json', JSON.stringify(v1))
+  const reloaded = loadTaskStore('/t/team-v1.json', (p) => files.get(p))
+  assert.equal(reloaded.schemaVersion, 1, '磁盘版本如实记录')
+  assert.deepEqual(reloaded.tasks.get(t.id).constraints, [], 'v1 缺列补空数组（零迁移兼容）')
+  assert.equal(reloaded.tasks.get(t.id).status, 'pending', '其余字段原样恢复')
+  // v2 文件往返：v2 列从磁盘原样恢复
+  const reloadedV2 = loadTaskStore('/t/team.json', (p) => files.get(p))
+  assert.equal(reloadedV2.schemaVersion, 2)
+  assert.deepEqual(reloadedV2.tasks.get(t.id).constraints, ['keep-me'], 'v2 列从磁盘原样恢复')
+})

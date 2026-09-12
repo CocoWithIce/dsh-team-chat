@@ -1,4 +1,4 @@
-# P2 调度器 + 队长工具面自研设计稿（v0.7 · 收口修订：F9 行数口径与指纹更正 + F10 版本号统一 + t89 四项合入 + README 同批，待复核）
+# P2 调度器 + 队长工具面自研设计稿（v0.8 · H7 行修订：「不自动开 repair」→ 自动 repair + 安全阀（P3 F-A 取代声明互引，t104 承载），待复核）
 
 > **任务**：t79。上游 = P1 状态层（已实现并两轮独立核验 pass）。
 > **状态**：**待对抗复核**。照 P1 模式：设计 → 对抗复核 → 冻结 → 实现。全部结论标注「已验证 / 推测 / 需实测」。
@@ -390,7 +390,7 @@ routingText(config, team, backend)          // backend ∈ 'agent-teams'（默�
 | H4 | 定向任务 assignee 不可用 | 任务停在 pending | 等成员恢复 / reassign 换人 / supersede | §2.4 不自动改派 |
 | H5 | 熔断成员的恢复 | 停止唤醒直到人工确认 | 确认配额重置/故障排除后 resume | §3.2 |
 | H6 | spawn 失败 | 不自动重试 | 排查后重试 | §4.1 |
-| H7 | review verdict needs_revision | **不自动开 repair**（与 AgentTeams 自动 review-repair 循环的本质区别） | 队长决定：create 修复任务（依赖成功的 source，不依赖 failed review——P1 质量门语义）/ supersede / 搁置 | 账本 t49→t52→t59→t67 四轮循环失控的直接教训 |
+| H7 | review verdict needs_revision | **自动创建 repair 任务（承载 findings）+ 轮数上限 + 结构化升级 EscalationRecord**（v0.8 · t104：原「不自动开 repair（与 AgentTeams 自动 review-repair 循环的本质区别）」立场被 **P3 设计稿 §4.1 显式取代声明**取代，P3 v0.2 = `D24D63184485`，两文档互引） | 队长保留升级裁决权（P3 §5.4 A-D）与 gate 框架外禁止；**取代依据** = P3 v0.2 安全阀（轮数上限 / EscalationRecord / 依赖只指成功源）+ 本会话五次手工修复循环运行证据（如 t74→t75→t76、t81→t82→t84→t86→t89→t90） | 原依据（账本 t49→t52→t59→t67 四轮循环失控的直接教训）的担忧由上述安全阀逐一对冲——取代论证详见 P3 设计稿 §4.1 与 §9-G8 H7 维度 |
 | H8 | 移除/轮换成员 | 前置条件不满足即拒绝并返回待处置清单 | 按流程处置任务后重试 | §4.2/§4.3 |
 
 **反面对照（写明「不自动」的完整清单，防实现时顺手加回来）**：不自动重试失败任务、不自动重排任何任务、不自动改派定向任务、不自动恢复不可用成员、不自动开修复任务、不自动 reclaim running 任务、不自动 spawn。
